@@ -2998,19 +2998,59 @@ sda.forecast.local <- function (settings, obs.mean, obs.cov, Q = NULL, pre_enkf_
       print("bk3")
       # ===== standardize obs.mean[[t]] and obs.cov[[t]] =====
       if (!is.null(obs.mean[[t]])) {
+        site_attr <- attr(X, "Site")
         for (sid in names(obs.mean[[t]])) {
           y <- obs.mean[[t]][[sid]]
           if (is.null(y)) next
           
           s_names <- names(y)
+          site_cols <- which(site_attr == sid)
+          site_state_names <- colnames(X)[site_cols]
+          state_pos <- match(s_names, site_state_names)
+          
+          if (any(is.na(state_pos))) {
+            missing_vars <- s_names[is.na(state_pos)]
+            stop(
+              paste0(
+                "Failed to normalize observations for site ", sid,
+                ". State variable(s) not found in forecast columns: ",
+                paste(missing_vars, collapse = ", ")
+              ),
+              call. = FALSE
+            )
+          }
+          
+          scale_idx <- site_cols[state_pos]
+          scale_mean <- state_mean[scale_idx]
+          scale_sd <- state_sd[scale_idx]
+          names(scale_mean) <- s_names
+          names(scale_sd) <- s_names
           
           # obs mean
-          obs.mean[[t]][[sid]] <- (y - state_mean[s_names]) / state_sd[s_names]
+          obs.mean[[t]][[sid]] <- (y - scale_mean) / scale_sd
           
           # obs covariance
           if (!is.null(obs.cov[[t]][[sid]])) {
-            D_inv <- diag(1 / state_sd[s_names], nrow = length(s_names))
-            obs.cov[[t]][[sid]] <- D_inv %*% obs.cov[[t]][[sid]] %*% D_inv
+            cov_sid <- obs.cov[[t]][[sid]]
+            if (is.null(dim(cov_sid))) {
+              cov_sid <- matrix(cov_sid, nrow = 1, ncol = 1)
+            }
+            if (nrow(cov_sid) == length(s_names) && ncol(cov_sid) == length(s_names)) {
+              rownames(cov_sid) <- s_names
+              colnames(cov_sid) <- s_names
+            } else {
+              stop(
+                paste0(
+                  "Failed to normalize obs.cov for site ", sid,
+                  ". Dimension mismatch: expected ",
+                  length(s_names), "x", length(s_names),
+                  " but got ", nrow(cov_sid), "x", ncol(cov_sid), "."
+                ),
+                call. = FALSE
+              )
+            }
+            D_inv <- diag(1 / scale_sd, nrow = length(s_names))
+            obs.cov[[t]][[sid]] <- D_inv %*% cov_sid %*% D_inv
             rownames(obs.cov[[t]][[sid]]) <- s_names
             colnames(obs.cov[[t]][[sid]]) <- s_names
           }
