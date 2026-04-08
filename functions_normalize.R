@@ -3000,10 +3000,12 @@ sda.forecast.local <- function (settings, obs.mean, obs.cov, Q = NULL, pre_enkf_
       
       print("bk3")
       # ===== standardize obs.mean[[t]] and obs.cov[[t]] =====
-      if (!is.null(obs.mean[[t]])) {
+      obs.mean.t.scaled <- obs.mean[[t]]
+      obs.cov.t.scaled <- obs.cov[[t]]
+      if (!is.null(obs.mean.t.scaled)) {
         site_attr <- attr(X, "Site")
-        for (sid in names(obs.mean[[t]])) {
-          y <- obs.mean[[t]][[sid]]
+        for (sid in names(obs.mean.t.scaled)) {
+          y <- obs.mean.t.scaled[[sid]]
           if (is.null(y)) next
           
           s_names <- names(y)
@@ -3030,11 +3032,11 @@ sda.forecast.local <- function (settings, obs.mean, obs.cov, Q = NULL, pre_enkf_
           names(scale_sd) <- s_names
           
           # obs mean
-          obs.mean[[t]][[sid]] <- (y - scale_mean) / scale_sd
+          obs.mean.t.scaled[[sid]] <- (y - scale_mean) / scale_sd
           
           # obs covariance
-          if (!is.null(obs.cov[[t]][[sid]])) {
-            cov_sid <- obs.cov[[t]][[sid]]
+          if (!is.null(obs.cov.t.scaled) && !is.null(obs.cov.t.scaled[[sid]])) {
+            cov_sid <- obs.cov.t.scaled[[sid]]
             if (is.null(dim(cov_sid))) {
               cov_sid <- matrix(cov_sid, nrow = 1, ncol = 1)
             }
@@ -3053,17 +3055,21 @@ sda.forecast.local <- function (settings, obs.mean, obs.cov, Q = NULL, pre_enkf_
               )
             }
             D_inv <- diag(1 / scale_sd, nrow = length(s_names))
-            obs.cov[[t]][[sid]] <- D_inv %*% cov_sid %*% D_inv
-            rownames(obs.cov[[t]][[sid]]) <- s_names
-            colnames(obs.cov[[t]][[sid]]) <- s_names
+            obs.cov.t.scaled[[sid]] <- D_inv %*% cov_sid %*% D_inv
+            rownames(obs.cov.t.scaled[[sid]]) <- s_names
+            colnames(obs.cov.t.scaled[[sid]]) <- s_names
           }
         }
       }
       print("bk4")
       
       ##### Revised
+      obs.mean.analysis <- vector("list", t)
+      obs.cov.analysis <- vector("list", t)
+      obs.mean.analysis[t] <- list(obs.mean.t.scaled)
+      obs.cov.analysis[t] <- list(obs.cov.t.scaled)
       enkf.params[[obs.t]] <- analysis_sda_block(settings,
-                                                 block.list.all, X, obs.mean, obs.cov, t, nt,
+                                                 block.list.all, X, obs.mean.analysis, obs.cov.analysis, t, nt,
                                                  MCMC.args, pre_enkf_params)
       
       ## ---- write MCMC diagnostics to outdir ----
