@@ -34,7 +34,7 @@ load("/projectnb/dietzelab/guYANG/pecan/runners/test10/pecan_flux.RData")
 
 #### Fix the multi output in one timestep bug
 settings$model$jobtemplate <- "/projectnb/dietzelab/guYANG/pecan/runners/test7/sipnet_template.job"
-settings$outdir <- "/projectnb/dietzelab/guYANG/pecan/runners/wishart_sda/wishart_sda/"
+settings$outdir <- "/projectnb/dietzelab/guYANG/pecan/runners/wishart_sda/output/"
 settings$host$prerun <- "module load R/4.4.0"
 
 # setup the batch job settings.
@@ -122,7 +122,7 @@ for (i in 1:length(obs.mean)) {
 # load PFT parameter file.
 load("/projectnb/dietzelab/dongchen/anchorSites/NA_runs/SDA_8k_site/samples.Rdata") ### Revised
 
-settings$rundir <- "/projectnb/dietzelab/guYANG/pecan/runners/wishart_sda/wishart_sda//run"
+settings$rundir <- "/projectnb/dietzelab/guYANG/pecan/runners/wishart_sda/output/run"
 
 ###### Change Q type
 settings$state.data.assimilation$q.type <- "wishart"
@@ -136,7 +136,7 @@ sda.forecast.local(settings = settings,
                    Q = NULL,
                    pre_enkf_params = NULL,
                    ensemble.samples = ensemble.samples,
-                   outdir = "/projectnb/dietzelab/guYANG/pecan/runners/wishart_sda/wishart_sda/",
+                   outdir = "/projectnb/dietzelab/guYANG/pecan/runners/wishart_sda/output/",
                    control = list(TimeseriesPlot = FALSE,
                                   OutlierDetection=FALSE,
                                   send_email = NULL,
@@ -148,3 +148,24 @@ sda.forecast.local(settings = settings,
                                     nthin = 10,
                                     nchain = 4
                                   )))
+
+
+# job_lines <- c(
+#   "#!/bin/bash",
+#   "module load R/4.4.0",
+#   "Rscript /projectnb/dietzelab/guYANG/pecan/runners/wishart_sda/wishart_sda/Block_sda_norm.R"
+# )
+# writeLines(job_lines, "/projectnb/dietzelab/guYANG/pecan/runners/wishart_sda/logs/Block_sda_norm.sh")
+
+# qsub -l h_rt=3:00:00 \
+# -l buyin \
+# -l mem_per_core=8G \
+# -pe omp 28 \
+# -V \
+# -N Block_sda_norm \
+# -o /projectnb/dietzelab/guYANG/pecan/runners/wishart_sda/logs/Block_sda_norm.out \
+# -e /projectnb/dietzelab/guYANG/pecan/runners/wishart_sda/logs/Block_sda_norm.err \
+# -M yanggu@bu.edu \
+# -m abe \
+# -S /bin/bash \
+# /projectnb/dietzelab/guYANG/pecan/runners/wishart_sda/logs/Block_sda_norm.sh
