@@ -2957,15 +2957,18 @@ sda.forecast.local <- function (settings, obs.mean, obs.cov, Q = NULL, pre_enkf_
       state_sd[state_sd == 0 | is.na(state_sd)] <- 1
     }
     
+    # keep an unscaled forecast copy for output consistency
+    X_unscaled <- X
+    
     # ===== standardize X using the fixed scaling =====
-    X_scaled <- sweep(X, 2, state_mean, FUN = "-")
+    X_scaled <- sweep(X_unscaled, 2, state_mean, FUN = "-")
     X_scaled <- sweep(X_scaled, 2, state_sd, FUN = "/")
     
     # keep Site attribute
-    attr(X_scaled, "Site") <- attr(X, "Site")
+    attr(X_scaled, "Site") <- attr(X_unscaled, "Site")
     
-    # store standardized forecast for SDA
-    FORECAST[[obs.t]] <- X_scaled
+    # keep forecast outputs in original units; use scaled copy for SDA internals
+    FORECAST[[obs.t]] <- X_unscaled
     X <- X_scaled
     print("bk2")
     gc()
@@ -2998,19 +3001,59 @@ sda.forecast.local <- function (settings, obs.mean, obs.cov, Q = NULL, pre_enkf_
       print("bk3")
       # ===== standardize obs.mean[[t]] and obs.cov[[t]] =====
       if (!is.null(obs.mean[[t]])) {
+        site_attr <- attr(X, "Site")
         for (sid in names(obs.mean[[t]])) {
           y <- obs.mean[[t]][[sid]]
           if (is.null(y)) next
           
           s_names <- names(y)
+          site_cols <- which(site_attr == sid)
+          site_state_names <- colnames(X)[site_cols]
+          state_pos <- match(s_names, site_state_names)
+          
+          if (any(is.na(state_pos))) {
+            missing_vars <- s_names[is.na(state_pos)]
+            stop(
+              paste0(
+                "Failed to normalize observations for site ", sid,
+                ". State variable(s) not found in forecast columns: ",
+                paste(missing_vars, collapse = ", ")
+              ),
+              call. = FALSE
+            )
+          }
+          
+          scale_idx <- site_cols[state_pos]
+          scale_mean <- state_mean[scale_idx]
+          scale_sd <- state_sd[scale_idx]
+          names(scale_mean) <- s_names
+          names(scale_sd) <- s_names
           
           # obs mean
-          obs.mean[[t]][[sid]] <- (y - state_mean[s_names]) / state_sd[s_names]
+          obs.mean[[t]][[sid]] <- (y - scale_mean) / scale_sd
           
           # obs covariance
           if (!is.null(obs.cov[[t]][[sid]])) {
-            D_inv <- diag(1 / state_sd[s_names], nrow = length(s_names))
-            obs.cov[[t]][[sid]] <- D_inv %*% obs.cov[[t]][[sid]] %*% D_inv
+            cov_sid <- obs.cov[[t]][[sid]]
+            if (is.null(dim(cov_sid))) {
+              cov_sid <- matrix(cov_sid, nrow = 1, ncol = 1)
+            }
+            if (nrow(cov_sid) == length(s_names) && ncol(cov_sid) == length(s_names)) {
+              rownames(cov_sid) <- s_names
+              colnames(cov_sid) <- s_names
+            } else {
+              stop(
+                paste0(
+                  "Failed to normalize obs.cov for site ", sid,
+                  ". Dimension mismatch: expected ",
+                  length(s_names), "x", length(s_names),
+                  " but got ", nrow(cov_sid), "x", ncol(cov_sid), "."
+                ),
+                call. = FALSE
+              )
+            }
+            D_inv <- diag(1 / scale_sd, nrow = length(s_names))
+            obs.cov[[t]][[sid]] <- D_inv %*% cov_sid %*% D_inv
             rownames(obs.cov[[t]][[sid]]) <- s_names
             colnames(obs.cov[[t]][[sid]]) <- s_names
           }
@@ -3039,17 +3082,16 @@ sda.forecast.local <- function (settings, obs.mean, obs.cov, Q = NULL, pre_enkf_
       mu.a <- enkf.params[[obs.t]]$mu.a
     }
     #### Release some space
+    print("bk5")
     if (!is.null(enkf.params[[obs.t]])) {
-      analysis <- enkf.params[[obs.t]]$analysis
+      analysis_scaled <- enkf.params[[obs.t]]$analysis
+      analysis <- sweep(analysis_scaled, 2, state_sd, FUN = "*")
+      analysis <- sweep(analysis, 2, state_mean, FUN = "+")
+      attr(analysis, "Site") <- attr(analysis_scaled, "Site")
     } else {
+      # free-run branch: forecast is already in original scale
       analysis <- FORECAST[[obs.t]]
     }
-    # ===== back-transform analysis to original scale =====
-    print("bk5")
-    analysis_unscaled <- sweep(analysis, 2, state_sd, FUN = "*")
-    analysis_unscaled <- sweep(analysis_unscaled, 2, state_mean, FUN = "+")
-    attr(analysis_unscaled, "Site") <- attr(analysis, "Site")
-    analysis <- analysis_unscaled
     print("bk6")
     
     ## ===== OBS → SIPNET (before restart) =====
