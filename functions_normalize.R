@@ -2957,15 +2957,18 @@ sda.forecast.local <- function (settings, obs.mean, obs.cov, Q = NULL, pre_enkf_
       state_sd[state_sd == 0 | is.na(state_sd)] <- 1
     }
     
+    # keep an unscaled forecast copy for output consistency
+    X_unscaled <- X
+    
     # ===== standardize X using the fixed scaling =====
-    X_scaled <- sweep(X, 2, state_mean, FUN = "-")
+    X_scaled <- sweep(X_unscaled, 2, state_mean, FUN = "-")
     X_scaled <- sweep(X_scaled, 2, state_sd, FUN = "/")
     
     # keep Site attribute
-    attr(X_scaled, "Site") <- attr(X, "Site")
+    attr(X_scaled, "Site") <- attr(X_unscaled, "Site")
     
-    # store standardized forecast for SDA
-    FORECAST[[obs.t]] <- X_scaled
+    # keep forecast outputs in original units; use scaled copy for SDA internals
+    FORECAST[[obs.t]] <- X_unscaled
     X <- X_scaled
     print("bk2")
     gc()
@@ -3079,17 +3082,16 @@ sda.forecast.local <- function (settings, obs.mean, obs.cov, Q = NULL, pre_enkf_
       mu.a <- enkf.params[[obs.t]]$mu.a
     }
     #### Release some space
+    print("bk5")
     if (!is.null(enkf.params[[obs.t]])) {
-      analysis <- enkf.params[[obs.t]]$analysis
+      analysis_scaled <- enkf.params[[obs.t]]$analysis
+      analysis <- sweep(analysis_scaled, 2, state_sd, FUN = "*")
+      analysis <- sweep(analysis, 2, state_mean, FUN = "+")
+      attr(analysis, "Site") <- attr(analysis_scaled, "Site")
     } else {
+      # free-run branch: forecast is already in original scale
       analysis <- FORECAST[[obs.t]]
     }
-    # ===== back-transform analysis to original scale =====
-    print("bk5")
-    analysis_unscaled <- sweep(analysis, 2, state_sd, FUN = "*")
-    analysis_unscaled <- sweep(analysis_unscaled, 2, state_mean, FUN = "+")
-    attr(analysis_unscaled, "Site") <- attr(analysis, "Site")
-    analysis <- analysis_unscaled
     print("bk6")
     
     ## ===== OBS → SIPNET (before restart) =====
