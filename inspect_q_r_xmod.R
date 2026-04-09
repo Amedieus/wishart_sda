@@ -777,10 +777,10 @@ extract_q_r_xmod <- function(outdir,
 
 # ------------------------------ Usage ---------------------------------
 # source("inspect_q_r_xmod.R")
-# out <- extract_q_r_xmod(
-#   outdir = "/projectnb/dietzelab/guYANG/pecan/runners/wishart_sda/output",
-#   output_dir = "/projectnb/dietzelab/guYANG/pecan/runners/wishart_sda/output/q_r_xmod_tables"
-# )
+out <- extract_q_r_xmod(
+  outdir = "/projectnb/dietzelab/guYANG/pecan/runners/wishart_sda/output",
+  output_dir = "/projectnb/dietzelab/guYANG/pecan/runners/wishart_sda/output/q_r_xmod_tables"
+)
 #
 # View per-timestep/site values:
 # head(out$q_diag)
