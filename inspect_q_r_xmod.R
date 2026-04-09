@@ -152,6 +152,90 @@ extract_q_r_xmod <- function(outdir,
     if (!is.na(y) && nzchar(y)) y else fallback
   }
 
+  to_date_safe <- function(x) {
+    if (is.null(x) || length(x) == 0) {
+      return(as.Date(NA))
+    }
+    x1 <- x[[1]]
+    d <- tryCatch(as.Date(x1), error = function(e) as.Date(NA))
+    if (!is.na(d)) {
+      return(d)
+    }
+    if (is.character(x1) && nchar(x1) >= 10) {
+      d2 <- tryCatch(as.Date(substr(x1, 1, 10)), error = function(e) as.Date(NA))
+      if (!is.na(d2)) {
+        return(d2)
+      }
+    }
+    if (is.numeric(x1) && is.finite(x1)) {
+      d3 <- tryCatch(
+        as.Date(as.POSIXct(x1, origin = "1970-01-01", tz = "UTC")),
+        error = function(e) as.Date(NA)
+      )
+      if (!is.na(d3)) {
+        return(d3)
+      }
+    }
+    as.Date(NA)
+  }
+
+  infer_date_year <- function(sda_outputs, t_idx) {
+    d <- as.Date(NA)
+
+    restart <- sda_outputs$restart.list
+    if (!is.null(restart) && length(restart) > 0) {
+      for (el in restart) {
+        if (!is.list(el)) {
+          next
+        }
+        cand <- to_date_safe(el$stop.time %||% el$stop_time)
+        if (!is.na(cand)) {
+          d <- cand
+          break
+        }
+      }
+    }
+
+    if (is.na(d)) {
+      enkf <- sda_outputs$enkf.params
+      rst2 <- enkf$RestartList
+      if (!is.null(rst2) && length(rst2) > 0) {
+        for (el in rst2) {
+          if (!is.list(el)) {
+            next
+          }
+          cand <- to_date_safe(el$stop.time %||% el$stop_time)
+          if (!is.na(cand)) {
+            d <- cand
+            break
+          }
+        }
+      }
+    }
+
+    date_label <- if (!is.na(d)) as.character(d) else paste0("timestep_", t_idx)
+    year_value <- if (!is.na(d)) as.integer(format(d, "%Y")) else NA_integer_
+    list(date_label = date_label, year = year_value)
+  }
+
+  lookup_obs_raw <- function(obs_t, site_id, state_var) {
+    if (is.null(obs_t) || is.na(site_id) || is.na(state_var)) {
+      return(NA_real_)
+    }
+    if (!is.list(obs_t) || !(site_id %in% names(obs_t))) {
+      return(NA_real_)
+    }
+    obs_site <- obs_t[[site_id]]
+    if (is.null(obs_site) || length(obs_site) == 0) {
+      return(NA_real_)
+    }
+    if (is.null(names(obs_site)) || !(state_var %in% names(obs_site))) {
+      return(NA_real_)
+    }
+    val <- suppressWarnings(as.numeric(obs_site[[state_var]]))
+    if (length(val) == 0) NA_real_ else val[1]
+  }
+
   sda_files <- list.files(
     outdir,
     pattern = "^sda\\.output[0-9]+\\.Rdata$",
@@ -178,6 +262,7 @@ extract_q_r_xmod <- function(outdir,
   r_diag_all <- list()
   r_matrix_all <- list()
   xmod_all <- list()
+  residual_all <- list()
 
   for (f in sda_files) {
     t_idx <- parse_timestep(f)
@@ -212,7 +297,10 @@ extract_q_r_xmod <- function(outdir,
       next
     }
 
-    date_label <- paste0("timestep_", t_idx)
+    date_info <- infer_date_year(sda_outputs, t_idx)
+    date_label <- date_info$date_label
+    year_value <- date_info$year
+    obs_raw_t <- sda_outputs$obs.mean
 
     for (b in seq_along(block_list)) {
       block <- block_list[[b]]
@@ -234,6 +322,7 @@ extract_q_r_xmod <- function(outdir,
       xmod_df <- data.frame(
         timestep = t_idx,
         date = date_label,
+        year = year_value,
         block_id = b,
         site_id = site_map,
         state_local_idx = seq_len(n_state),
@@ -269,6 +358,7 @@ extract_q_r_xmod <- function(outdir,
           q_diag_df <- data.frame(
             timestep = t_idx,
             date = date_label,
+            year = year_value,
             block_id = b,
             q_type = q_type,
             obs_idx = seq_len(n_obs),
@@ -301,6 +391,7 @@ extract_q_r_xmod <- function(outdir,
           q_diag_df <- data.frame(
             timestep = t_idx,
             date = date_label,
+            year = year_value,
             block_id = b,
             q_type = q_type,
             obs_idx = seq_len(n_obs),
@@ -319,6 +410,7 @@ extract_q_r_xmod <- function(outdir,
           if (nrow(q_mat_long) > 0) {
             q_mat_long$timestep <- t_idx
             q_mat_long$date <- date_label
+            q_mat_long$year <- year_value
             q_mat_long$block_id <- b
             q_mat_long$q_type <- q_type
             q_mat_long$bq <- as.numeric(block$data$bq)[1]
@@ -341,6 +433,7 @@ extract_q_r_xmod <- function(outdir,
         r_diag_df <- data.frame(
           timestep = t_idx,
           date = date_label,
+          year = year_value,
           block_id = b,
           obs_idx = seq_len(n_obs),
           site_id = meta$site_id,
@@ -355,9 +448,54 @@ extract_q_r_xmod <- function(outdir,
         if (nrow(r_mat_long) > 0) {
           r_mat_long$timestep <- t_idx
           r_mat_long$date <- date_label
+          r_mat_long$year <- year_value
           r_mat_long$block_id <- b
           r_matrix_all[[length(r_matrix_all) + 1L]] <- r_mat_long
         }
+      }
+
+      y_obs <- suppressWarnings(as.numeric(block$data$y.censored))
+      n_obs_res <- length(y_obs)
+      if (n_obs_res > 0) {
+        meta_res <- build_meta_for_obs(
+          obs_idx = obs_idx,
+          site_map = site_map,
+          state_names = state_names,
+          n_obs = n_obs_res,
+          fallback_site = fallback_site
+        )
+
+        xmod_at_obs <- rep(NA_real_, n_obs_res)
+        valid_idx <- !is.na(meta_res$state_local_idx) &
+          meta_res$state_local_idx > 0 &
+          meta_res$state_local_idx <= length(xmod)
+        xmod_at_obs[valid_idx] <- as.numeric(xmod[meta_res$state_local_idx[valid_idx]])
+
+        residual_scaled <- xmod_at_obs - y_obs
+
+        obs_raw <- vapply(
+          seq_len(n_obs_res),
+          function(i) lookup_obs_raw(obs_raw_t, meta_res$site_id[i], meta_res$state_var[i]),
+          numeric(1)
+        )
+
+        residual_df <- data.frame(
+          timestep = t_idx,
+          date = date_label,
+          year = year_value,
+          block_id = b,
+          q_type = q_type,
+          obs_idx = seq_len(n_obs_res),
+          site_id = meta_res$site_id,
+          state_var = meta_res$state_var,
+          state_local_idx = meta_res$state_local_idx,
+          xmod_mean = xmod_at_obs,
+          obs_used_scaled = y_obs,
+          residual_xmod_minus_obs_scaled = residual_scaled,
+          obs_raw = obs_raw,
+          stringsAsFactors = FALSE
+        )
+        residual_all[[length(residual_all) + 1L]] <- residual_df
       }
     }
   }
@@ -367,13 +505,72 @@ extract_q_r_xmod <- function(outdir,
   r_diag <- safe_bind(r_diag_all)
   r_matrix <- safe_bind(r_matrix_all)
   xmod <- safe_bind(xmod_all)
+  residual <- safe_bind(residual_all)
+
+  residual_qr <- residual
+  join_keys <- c("timestep", "block_id", "obs_idx", "site_id", "state_var")
+
+  if (nrow(residual_qr) > 0 && nrow(q_diag) > 0 && all(join_keys %in% names(q_diag))) {
+    q_keep <- unique(c(join_keys, "q_diag", "q_mode"))
+    q_keep <- q_keep[q_keep %in% names(q_diag)]
+    residual_qr <- merge(
+      residual_qr,
+      q_diag[, q_keep, drop = FALSE],
+      by = join_keys,
+      all.x = TRUE
+    )
+    if ("date.x" %in% names(residual_qr)) {
+      residual_qr$date <- residual_qr$date.x
+      residual_qr$date.x <- NULL
+    } else if ("date.y" %in% names(residual_qr) && !("date" %in% names(residual_qr))) {
+      residual_qr$date <- residual_qr$date.y
+      residual_qr$date.y <- NULL
+    }
+    if ("year.x" %in% names(residual_qr)) {
+      residual_qr$year <- residual_qr$year.x
+      residual_qr$year.x <- NULL
+    } else if ("year.y" %in% names(residual_qr) && !("year" %in% names(residual_qr))) {
+      residual_qr$year <- residual_qr$year.y
+      residual_qr$year.y <- NULL
+    }
+  } else if (nrow(residual_qr) > 0) {
+    residual_qr$q_diag <- NA_real_
+    residual_qr$q_mode <- NA_real_
+  }
+
+  if (nrow(residual_qr) > 0 && nrow(r_diag) > 0 && all(join_keys %in% names(r_diag))) {
+    r_keep <- unique(c(join_keys, "r_diag"))
+    r_keep <- r_keep[r_keep %in% names(r_diag)]
+    residual_qr <- merge(
+      residual_qr,
+      r_diag[, r_keep, drop = FALSE],
+      by = join_keys,
+      all.x = TRUE
+    )
+    if ("date.x" %in% names(residual_qr)) {
+      residual_qr$date <- residual_qr$date.x
+      residual_qr$date.x <- NULL
+    } else if ("date.y" %in% names(residual_qr) && !("date" %in% names(residual_qr))) {
+      residual_qr$date <- residual_qr$date.y
+      residual_qr$date.y <- NULL
+    }
+    if ("year.x" %in% names(residual_qr)) {
+      residual_qr$year <- residual_qr$year.x
+      residual_qr$year.x <- NULL
+    } else if ("year.y" %in% names(residual_qr) && !("year" %in% names(residual_qr))) {
+      residual_qr$year <- residual_qr$year.y
+      residual_qr$year.y <- NULL
+    }
+  } else if (nrow(residual_qr) > 0 && !("r_diag" %in% names(residual_qr))) {
+    residual_qr$r_diag <- NA_real_
+  }
 
   q_xmod <- data.frame()
   if (all(c("timestep", "block_id", "site_id", "state_var", "q_diag") %in% names(q_diag)) &&
       all(c("timestep", "block_id", "site_id", "state_var", "xmod_mean") %in% names(xmod))) {
     q_xmod <- merge(
-      q_diag[, c("timestep", "date", "block_id", "site_id", "state_var", "q_diag"), drop = FALSE],
-      xmod[, c("timestep", "date", "block_id", "site_id", "state_var", "xmod_mean"), drop = FALSE],
+      q_diag[, c("timestep", "date", "year", "block_id", "site_id", "state_var", "q_diag"), drop = FALSE],
+      xmod[, c("timestep", "date", "year", "block_id", "site_id", "state_var", "xmod_mean"), drop = FALSE],
       by = c("timestep", "block_id", "site_id", "state_var"),
       all = FALSE
     )
@@ -384,14 +581,21 @@ extract_q_r_xmod <- function(outdir,
       q_xmod$date <- q_xmod$date.y
       q_xmod$date.y <- NULL
     }
+    if ("year.x" %in% names(q_xmod)) {
+      q_xmod$year <- q_xmod$year.x
+      q_xmod$year.x <- NULL
+    } else if ("year.y" %in% names(q_xmod)) {
+      q_xmod$year <- q_xmod$year.y
+      q_xmod$year.y <- NULL
+    }
   }
 
   r_xmod <- data.frame()
   if (all(c("timestep", "block_id", "site_id", "state_var", "r_diag") %in% names(r_diag)) &&
       all(c("timestep", "block_id", "site_id", "state_var", "xmod_mean") %in% names(xmod))) {
     r_xmod <- merge(
-      r_diag[, c("timestep", "date", "block_id", "site_id", "state_var", "r_diag"), drop = FALSE],
-      xmod[, c("timestep", "date", "block_id", "site_id", "state_var", "xmod_mean"), drop = FALSE],
+      r_diag[, c("timestep", "date", "year", "block_id", "site_id", "state_var", "r_diag"), drop = FALSE],
+      xmod[, c("timestep", "date", "year", "block_id", "site_id", "state_var", "xmod_mean"), drop = FALSE],
       by = c("timestep", "block_id", "site_id", "state_var"),
       all = FALSE
     )
@@ -401,6 +605,13 @@ extract_q_r_xmod <- function(outdir,
     } else if ("date.y" %in% names(r_xmod)) {
       r_xmod$date <- r_xmod$date.y
       r_xmod$date.y <- NULL
+    }
+    if ("year.x" %in% names(r_xmod)) {
+      r_xmod$year <- r_xmod$year.x
+      r_xmod$year.x <- NULL
+    } else if ("year.y" %in% names(r_xmod)) {
+      r_xmod$year <- r_xmod$year.y
+      r_xmod$year.y <- NULL
     }
   }
 
@@ -436,12 +647,83 @@ extract_q_r_xmod <- function(outdir,
   q_xmod_summary <- summarize_relationship(q_xmod, "q_diag")
   r_xmod_summary <- summarize_relationship(r_xmod, "r_diag")
 
+  summarize_residual_qr <- function(df, group_cols) {
+    if (nrow(df) == 0) {
+      return(data.frame())
+    }
+    group_cols <- group_cols[group_cols %in% names(df)]
+    if (length(group_cols) == 0) {
+      return(data.frame())
+    }
+    split_key <- apply(df[, group_cols, drop = FALSE], 1, paste, collapse = "||")
+    chunks <- split(df, split_key)
+    out <- lapply(chunks, function(d) {
+      base <- d[1, group_cols, drop = FALSE]
+
+      res <- d$residual_xmod_minus_obs_scaled
+      qv <- d$q_diag
+      rv <- d$r_diag
+
+      ok_res <- is.finite(res)
+      ok_q <- ok_res & is.finite(qv)
+      ok_r <- ok_res & is.finite(rv)
+
+      n_res <- sum(ok_res)
+      n_q <- sum(ok_q)
+      n_r <- sum(ok_r)
+
+      corr_r_q <- if (n_q >= 2) stats::cor(res[ok_q], qv[ok_q]) else NA_real_
+      corr_r_r <- if (n_r >= 2) stats::cor(res[ok_r], rv[ok_r]) else NA_real_
+
+      slope_r_on_q <- if (n_q >= 2) coef(stats::lm(res[ok_q] ~ qv[ok_q]))[2] else NA_real_
+      slope_r_on_r <- if (n_r >= 2) coef(stats::lm(res[ok_r] ~ rv[ok_r]))[2] else NA_real_
+
+      data.frame(
+        base,
+        n_rows = nrow(d),
+        n_timestep = length(unique(d$timestep)),
+        n_residual = n_res,
+        residual_mean = if (n_res > 0) mean(res[ok_res]) else NA_real_,
+        residual_sd = if (n_res > 1) stats::sd(res[ok_res]) else NA_real_,
+        q_mean = if (n_q > 0) mean(qv[ok_q]) else NA_real_,
+        r_mean = if (n_r > 0) mean(rv[ok_r]) else NA_real_,
+        n_pair_res_q = n_q,
+        corr_residual_q = corr_r_q,
+        slope_residual_on_q = slope_r_on_q,
+        n_pair_res_r = n_r,
+        corr_residual_r = corr_r_r,
+        slope_residual_on_r = slope_r_on_r,
+        stringsAsFactors = FALSE
+      )
+    })
+    do.call(rbind, out)
+  }
+
+  residual_qr_by_site_year_state <- summarize_residual_qr(
+    residual_qr,
+    c("site_id", "year", "state_var")
+  )
+  residual_qr_by_site_year <- summarize_residual_qr(
+    residual_qr,
+    c("site_id", "year")
+  )
+
   results <- list(
     q_diag = safe_order(q_diag, c("timestep", "site_id", "state_var")),
     q_matrix = safe_order(q_matrix, c("timestep", "block_id", "row_obs_idx", "col_obs_idx")),
     r_diag = safe_order(r_diag, c("timestep", "site_id", "state_var")),
     r_matrix = safe_order(r_matrix, c("timestep", "block_id", "row_obs_idx", "col_obs_idx")),
     xmod = safe_order(xmod, c("timestep", "site_id", "state_var")),
+    residual = safe_order(residual, c("timestep", "site_id", "state_var")),
+    residual_qr = safe_order(residual_qr, c("timestep", "site_id", "state_var")),
+    residual_qr_by_site_year_state = safe_order(
+      residual_qr_by_site_year_state,
+      c("site_id", "year", "state_var")
+    ),
+    residual_qr_by_site_year = safe_order(
+      residual_qr_by_site_year,
+      c("site_id", "year")
+    ),
     q_xmod = safe_order(q_xmod, c("timestep", "site_id", "state_var")),
     r_xmod = safe_order(r_xmod, c("timestep", "site_id", "state_var")),
     q_xmod_summary = safe_order(q_xmod_summary, c("site_id", "state_var")),
@@ -454,6 +736,18 @@ extract_q_r_xmod <- function(outdir,
     utils::write.csv(results$r_diag, file.path(output_dir, "r_diag_by_timestep_site.csv"), row.names = FALSE)
     utils::write.csv(results$r_matrix, file.path(output_dir, "r_matrix_by_timestep_site.csv"), row.names = FALSE)
     utils::write.csv(results$xmod, file.path(output_dir, "xmod_by_timestep_site.csv"), row.names = FALSE)
+    utils::write.csv(results$residual, file.path(output_dir, "residual_xmod_minus_obs_by_timestep_site.csv"), row.names = FALSE)
+    utils::write.csv(results$residual_qr, file.path(output_dir, "residual_with_qr_by_timestep_site.csv"), row.names = FALSE)
+    utils::write.csv(
+      results$residual_qr_by_site_year_state,
+      file.path(output_dir, "residual_qr_relationship_by_site_year_state.csv"),
+      row.names = FALSE
+    )
+    utils::write.csv(
+      results$residual_qr_by_site_year,
+      file.path(output_dir, "residual_qr_relationship_by_site_year.csv"),
+      row.names = FALSE
+    )
     utils::write.csv(results$q_xmod, file.path(output_dir, "q_vs_xmod_by_timestep_site.csv"), row.names = FALSE)
     utils::write.csv(results$r_xmod, file.path(output_dir, "r_vs_xmod_by_timestep_site.csv"), row.names = FALSE)
     utils::write.csv(results$q_xmod_summary, file.path(output_dir, "q_vs_xmod_summary.csv"), row.names = FALSE)
@@ -473,7 +767,8 @@ extract_q_r_xmod <- function(outdir,
     message("Timesteps processed: ", timesteps)
     message("Rows - Q diag: ", nrow(results$q_diag),
             ", R diag: ", nrow(results$r_diag),
-            ", X.mod: ", nrow(results$xmod))
+            ", X.mod: ", nrow(results$xmod),
+            ", Residual: ", nrow(results$residual))
   }
 
   results
