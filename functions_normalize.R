@@ -2632,25 +2632,51 @@ update_q <- function (block.list.all, t, nt, aqq.Init = NULL, bqq.Init = NULL, M
           block.list[[i]]$data$bq <- block.list[[i]]$bqq[block.list[[i]]$constant$H, t]
         } else if (block.list[[i]]$constant$q.type == 4) {
           
-          
-          v_diag <- c(0.1, 1.0, 2.0, 0.5, 2.0, 0.2)
+          # Use the manually specified diagonal + correlation structure at t = 1.
+          # This does NOT use aq/bq from settings.
+          v_diag <- c(0.1, 2.0, 2.0, 0.5, 2.0, 0.2)
           
           if (nvar != length(v_diag)) {
             stop(paste0(
-              "q.type == 4: nvar = ", nvar,
+              "q.type == 4 (initial): nvar = ", nvar,
               " but v_diag length = ", length(v_diag),
               ". Check block state order."
             ))
           }
           
-          block.list[[i]]$aqq <- array(NA_real_, dim = c(nvar, nvar, nt + 1))
+          # Build the same weak process correlation structure you previously used.
+          R0 <- diag(nvar)
+          # assumed order:
+          # 1 AbvGrndWood
+          # 2 NEE
+          # 3 Qle
+          # 4 LAI
+          # 5 SoilMoistFrac
+          # 6 TotSoilCarb
+          R0[2,3] <- R0[3,2] <- 0.30
+          R0[3,5] <- R0[5,3] <- 0.35
+          R0[1,4] <- R0[4,1] <- 0.10
+          R0[1,6] <- R0[6,1] <- 0.10
+          R0[4,5] <- R0[5,4] <- 0.15
           
-          for (tt in 1:(nt + 1)) {
-            block.list[[i]]$aqq[,,tt] <- diag(v_diag)
+          sd_vec <- sqrt(v_diag)
+          Dmat <- diag(sd_vec)
+          Vmat <- Dmat %*% R0 %*% Dmat
+          Vmat <- (Vmat + t(Vmat)) / 2
+          
+          eig_min <- min(eigen(Vmat, symmetric = TRUE, only.values = TRUE)$values)
+          if (eig_min <= 1e-8) {
+            Vmat <- Vmat + diag(abs(eig_min) + 1e-6, nvar)
           }
           
-          # df / strength
-          block.list[[i]]$bqq <- rep(max(nobs, nvar + 2), nt + 1)
+          block.list[[i]]$aqq <- array(NA_real_, dim = c(nvar, nvar, nt + 1))
+          for (tt in 1:(nt + 1)) {
+            block.list[[i]]$aqq[,,tt] <- Vmat
+          }
+          
+          # Set initial Wishart df strength from block size (not settings aq/bq).
+          df_val <- max(nobs, 2 * nvar + 15)
+          block.list[[i]]$bqq <- rep(df_val, nt + 1)
           
           block.list[[i]]$data$aq <- GrabFillMatrix(
             block.list[[i]]$aqq[,,t],
