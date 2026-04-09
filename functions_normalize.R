@@ -1652,6 +1652,116 @@ analysis_sda_block <- function (settings, block.list.all, X, obs.mean, obs.cov,
   foreach::registerDoSEQ()
   PEcAn.logger::logger.info("Completed!")
   
+  # For Wishart Q (q.type == 4), propagate posterior Q information learned at t
+  # into hyperparameters used at t+1. This enables true temporal adaptation.
+  if (t < nt) {
+    make_spd <- function(M, jitter = 1e-6) {
+      if (is.null(M) || is.null(dim(M))) {
+        return(M)
+      }
+      M <- as.matrix(M)
+      M <- (M + t(M)) / 2
+      if (any(!is.finite(M))) {
+        return(M)
+      }
+      ev <- eigen(M, symmetric = TRUE, only.values = TRUE)$values
+      min_ev <- min(ev)
+      if (!is.finite(min_ev)) {
+        return(M)
+      }
+      if (min_ev <= jitter) {
+        M <- M + diag(abs(min_ev) + jitter, nrow(M))
+      }
+      M
+    }
+    
+    q_next_lambda <- suppressWarnings(as.numeric(settings$state.data.assimilation$q.next.lambda))
+    if (!is.finite(q_next_lambda)) {
+      q_next_lambda <- 1.0
+    }
+    q_next_lambda <- max(0, min(1, q_next_lambda))
+    
+    q_df_strength_factor <- suppressWarnings(as.numeric(settings$state.data.assimilation$q.df.strength.factor))
+    if (!is.finite(q_df_strength_factor)) {
+      q_df_strength_factor <- 2.0
+    }
+    
+    q_df_min_offset <- suppressWarnings(as.numeric(settings$state.data.assimilation$q.df.min.offset))
+    if (!is.finite(q_df_min_offset)) {
+      q_df_min_offset <- 2.0
+    }
+    q_df_min_offset <- max(0, q_df_min_offset)
+    
+    q_df_next_override <- suppressWarnings(as.numeric(settings$state.data.assimilation$q.df.next))
+    if (!is.finite(q_df_next_override)) {
+      q_df_next_override <- NA_real_
+    }
+    
+    block.list.all[[t]] <- purrr::map(block.list.all[[t]], function(l) {
+      if (is.null(l$constant$q.type) || l$constant$q.type != 4) {
+        return(l)
+      }
+      if (is.null(l$update$q_post_mean)) {
+        return(l)
+      }
+      if (is.null(l$aqq) || length(dim(l$aqq)) != 3) {
+        return(l)
+      }
+      if (is.null(l$bqq) || length(l$bqq) < (t + 1)) {
+        return(l)
+      }
+      
+      h_idx <- as.integer(l$constant$H)
+      nvar <- nrow(l$aqq[, , t, drop = FALSE][, , 1])
+      if (length(h_idx) == 0 || any(!is.finite(h_idx)) ||
+          any(h_idx < 1) || any(h_idx > nvar)) {
+        return(l)
+      }
+      
+      q_post <- l$update$q_post_mean
+      if (is.null(dim(q_post))) {
+        q_post <- as.numeric(q_post)
+        if (length(q_post) == length(h_idx)^2) {
+          q_post <- matrix(q_post, nrow = length(h_idx), ncol = length(h_idx), byrow = TRUE)
+        } else if (length(q_post) == length(h_idx)) {
+          q_post <- diag(q_post, nrow = length(h_idx))
+        } else {
+          return(l)
+        }
+      }
+      if (!all(dim(q_post) == c(length(h_idx), length(h_idx)))) {
+        return(l)
+      }
+      q_post <- make_spd(q_post)
+      
+      df_curr <- suppressWarnings(as.numeric(l$bqq[t]))
+      if (!is.finite(df_curr) || df_curr <= 0) {
+        df_curr <- max(length(h_idx) + 2, 1)
+      }
+      
+      sigma_curr_full <- l$aqq[, , t]
+      sigma_curr_obs <- GrabFillMatrix(sigma_curr_full, h_idx)
+      q_prior_obs_mean <- make_spd(sigma_curr_obs * df_curr)
+      
+      q_target_obs_mean <- make_spd((1 - q_next_lambda) * q_prior_obs_mean + q_next_lambda * q_post)
+      
+      df_next <- max(length(h_idx) + q_df_min_offset,
+                     ceiling(q_df_strength_factor * length(h_idx)))
+      if (is.finite(q_df_next_override) && q_df_next_override > (length(h_idx) - 1)) {
+        df_next <- q_df_next_override
+      }
+      
+      sigma_next_obs <- make_spd(q_target_obs_mean / df_next)
+      sigma_next_full <- sigma_curr_full
+      sigma_next_full[h_idx, h_idx] <- sigma_next_obs
+      sigma_next_full <- make_spd(sigma_next_full)
+      
+      l$aqq[, , t + 1] <- sigma_next_full
+      l$bqq[t + 1] <- df_next
+      l
+    })
+  }
+  
   # convert from block lists to vector values.
   if ("try-error" %in% class(try(
     V <- block.2.vector(block.list.all[[t]], X, H)
@@ -2343,6 +2453,83 @@ MCMC_block_function <- function(block) {
             nrow(dat_mat), ncol(dat_mat))
   )
   
+  extract_q_posterior_mean <- function(samples_mat, q_type, yn = NULL) {
+    q_idx <- grep("^q\\[", colnames(samples_mat))
+    if (length(q_idx) == 0) {
+      return(NULL)
+    }
+    
+    q_samples <- samples_mat[, q_idx, drop = FALSE]
+    q_names <- colnames(q_samples)
+    
+    idx_list <- lapply(q_names, function(nm) {
+      inside <- sub("^q\\[", "", nm)
+      inside <- sub("\\]$", "", inside)
+      nums <- regmatches(inside, gregexpr("[0-9]+", inside))[[1]]
+      as.integer(nums)
+    })
+    idx_len <- vapply(idx_list, length, integer(1))
+    
+    # Vector-form q (or flattened indexing style)
+    if (all(idx_len <= 1)) {
+      idx <- vapply(idx_list, function(v) {
+        if (length(v) == 0) NA_integer_ else v[1]
+      }, integer(1))
+      ok <- is.finite(idx)
+      if (!any(ok)) {
+        return(NULL)
+      }
+      
+      max_idx <- max(idx[ok])
+      q_vec <- rep(NA_real_, max_idx)
+      for (k in which(ok)) {
+        q_vec[idx[k]] <- mean(q_samples[, k], na.rm = TRUE)
+      }
+      
+      # If Wishart q is flattened, reconstruct a square matrix when possible.
+      if (identical(q_type, 4L) || identical(q_type, 4)) {
+        n_side <- NA_integer_
+        if (!is.null(yn) && is.finite(yn) && yn > 0) {
+          n_side <- as.integer(yn)
+        } else {
+          n_side <- as.integer(round(sqrt(length(q_vec))))
+        }
+        if (!is.na(n_side) && n_side > 0 && n_side * n_side == length(q_vec)) {
+          q_mat <- matrix(q_vec, nrow = n_side, ncol = n_side, byrow = TRUE)
+          q_mat <- (q_mat + t(q_mat)) / 2
+          return(q_mat)
+        }
+      }
+      
+      return(q_vec)
+    }
+    
+    # Matrix-form q with names like q[i, j]
+    rows <- vapply(idx_list, function(v) if (length(v) >= 1) v[1] else NA_integer_, integer(1))
+    cols <- vapply(idx_list, function(v) if (length(v) >= 2) v[2] else NA_integer_, integer(1))
+    ok <- is.finite(rows) & is.finite(cols)
+    if (!any(ok)) {
+      return(NULL)
+    }
+    
+    nr <- max(rows[ok])
+    nc <- max(cols[ok])
+    q_mat <- matrix(NA_real_, nrow = nr, ncol = nc)
+    for (k in which(ok)) {
+      q_mat[rows[k], cols[k]] <- mean(q_samples[, k], na.rm = TRUE)
+    }
+    if (nr == nc) {
+      q_mat <- (q_mat + t(q_mat)) / 2
+    }
+    q_mat
+  }
+  
+  q_post_mean <- extract_q_posterior_mean(
+    samples_mat = dat_mat,
+    q_type = block$constant$q.type,
+    yn = block$constant$YN
+  )
+  
   ## ---- 10. Extract posterior for X and X.mod ----
   iX      <- grep("^X\\[", colnames(dat_mat))
   iX_mod  <- grep("^X.mod\\[", colnames(dat_mat))
@@ -2379,8 +2566,9 @@ MCMC_block_function <- function(block) {
     pa  = pa,
     mufa = mufa,
     pfa = pfa,
-    aq = NA,
-    bq = NA
+    q_post_mean = q_post_mean,
+    aq = block$data$aq,
+    bq = block$data$bq
   )
   
   ## 保存诊断对象
@@ -2489,60 +2677,13 @@ update_q <- function (block.list.all, t, nt, aqq.Init = NULL, bqq.Init = NULL, M
           block.list[[i]]$data$aq <- block.list[[i]]$aqq[block.list[[i]]$constant$H, t]
           block.list[[i]]$data$bq <- block.list[[i]]$bqq[block.list[[i]]$constant$H, t]
         } else if (block.list[[i]]$constant$q.type == 4) {
-          
-          # ---------- state-specific marginal scales ----------
-          v_diag <- c(0.1, 2.0, 2.0, 0.5, 2.0, 0.2)
-          
-          if (nvar != length(v_diag)) {
-            stop(paste0(
-              "q.type == 4: nvar = ", nvar,
-              " but v_diag length = ", length(v_diag),
-              ". Check block state order."
-            ))
-          }
-          
-          # ---------- weak process correlation structure ----------
-          R <- diag(nvar)
-          
-          # assuming order:
-          # 1 AbvGrndWood
-          # 2 NEE
-          # 3 Qle
-          # 4 LAI
-          # 5 SoilMoistFrac
-          # 6 TotSoilCarb
-          
-          R[2,3] <- R[3,2] <- 0.30   # NEE - Qle
-          R[3,5] <- R[5,3] <- 0.35   # Qle - SoilMoistFrac
-          R[1,4] <- R[4,1] <- 0.10   # AbvGrndWood - LAI
-          R[1,6] <- R[6,1] <- 0.10   # AbvGrndWood - TotSoilCarb
-          R[4,5] <- R[5,4] <- 0.15   # LAI - SoilMoistFrac
-          
-          # ---------- build scale matrix V = D R D ----------
-          sd_vec <- sqrt(v_diag)
-          Dmat <- diag(sd_vec)
-          Vmat <- Dmat %*% R %*% Dmat
-          
-          # numerical safety: force symmetry
-          Vmat <- (Vmat + t(Vmat)) / 2
-          
-          # numerical safety: add tiny jitter if needed
-          eig_min <- min(eigen(Vmat, symmetric = TRUE, only.values = TRUE)$values)
-          if (eig_min <= 1e-8) {
-            Vmat <- Vmat + diag(abs(eig_min) + 1e-6, nvar)
-          }
-          
-          block.list[[i]]$aqq <- array(NA_real_, dim = c(nvar, nvar, nt + 1))
-          for (tt in 1:(nt + 1)) {
-            block.list[[i]]$aqq[,,tt] <- Vmat
-          }
-          
-          # ---------- stronger df ----------
-          df_val <- max(nobs, 2 * nvar + 15)
-          block.list[[i]]$bqq <- rep(df_val, nt + 1)
+          # Copy previous hyperparameters and use current t slice.
+          # This allows posterior-driven updates written at t to be used at t+1.
+          block.list[[i]]$aqq <- block.list.pre[[i]]$aqq
+          block.list[[i]]$bqq <- block.list.pre[[i]]$bqq
           
           block.list[[i]]$data$aq <- GrabFillMatrix(
-            block.list[[i]]$aqq[,,t],
+            block.list[[i]]$aqq[, , t],
             block.list[[i]]$constant$H
           )
           block.list[[i]]$data$bq <- block.list[[i]]$bqq[t]
