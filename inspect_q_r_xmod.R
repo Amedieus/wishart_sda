@@ -1,7 +1,12 @@
 extract_q_r_xmod <- function(outdir,
                              output_dir = file.path(outdir, "q_r_xmod_tables"),
                              write_csv = TRUE,
-                             verbose = TRUE) {
+                             verbose = TRUE,
+                             write_plots = TRUE,
+                             plot_dir = file.path(output_dir, "plots"),
+                             plot_width = 14,
+                             plot_height = 8,
+                             plot_dpi = 160) {
   `%||%` <- function(x, y) if (is.null(x)) y else x
 
   parse_timestep <- function(path) {
@@ -234,6 +239,198 @@ extract_q_r_xmod <- function(outdir,
     }
     val <- suppressWarnings(as.numeric(obs_site[[state_var]]))
     if (length(val) == 0) NA_real_ else val[1]
+  }
+
+  generate_residual_relation_plots <- function(df,
+                                               plot_dir,
+                                               plot_width,
+                                               plot_height,
+                                               plot_dpi,
+                                               verbose = TRUE) {
+    if (nrow(df) == 0) {
+      return(character(0))
+    }
+    if (!requireNamespace("ggplot2", quietly = TRUE)) {
+      warning("Package 'ggplot2' not available. Skipping plot generation.")
+      return(character(0))
+    }
+
+    if (!dir.exists(plot_dir)) {
+      dir.create(plot_dir, recursive = TRUE, showWarnings = FALSE)
+    }
+
+    safe_write_plot <- function(p, file_name) {
+      out_path <- file.path(plot_dir, file_name)
+      ok <- tryCatch(
+        {
+          ggplot2::ggsave(
+            filename = out_path,
+            plot = p,
+            width = plot_width,
+            height = plot_height,
+            dpi = plot_dpi
+          )
+          TRUE
+        },
+        error = function(e) {
+          warning("Failed to write plot ", out_path, ": ", conditionMessage(e))
+          FALSE
+        }
+      )
+      if (ok) out_path else NA_character_
+    }
+
+    build_pair_time_plot <- function(value_col, title_text, y_label_other) {
+      keep <- c("timestep", "date", "site_id", "state_var", "residual_xmod_minus_obs_scaled", value_col)
+      keep <- keep[keep %in% names(df)]
+      if (!all(c("timestep", "site_id", "state_var", "residual_xmod_minus_obs_scaled", value_col) %in% keep)) {
+        return(NULL)
+      }
+      d <- df[, keep, drop = FALSE]
+      d <- d[
+        is.finite(d$residual_xmod_minus_obs_scaled) & is.finite(d[[value_col]]),
+        ,
+        drop = FALSE
+      ]
+      if (nrow(d) == 0) {
+        return(NULL)
+      }
+
+      long_df <- rbind(
+        data.frame(
+          timestep = d$timestep,
+          date = d$date,
+          site_id = d$site_id,
+          state_var = d$state_var,
+          metric = y_label_other,
+          value = d[[value_col]],
+          stringsAsFactors = FALSE
+        ),
+        data.frame(
+          timestep = d$timestep,
+          date = d$date,
+          site_id = d$site_id,
+          state_var = d$state_var,
+          metric = "Residual (X.mod - Obs)",
+          value = d$residual_xmod_minus_obs_scaled,
+          stringsAsFactors = FALSE
+        )
+      )
+
+      ggplot2::ggplot(
+        long_df,
+        ggplot2::aes(x = timestep, y = value, color = site_id, group = site_id)
+      ) +
+        ggplot2::geom_line(alpha = 0.7) +
+        ggplot2::geom_point(alpha = 0.8, size = 1.4) +
+        ggplot2::facet_grid(metric ~ state_var, scales = "free_y") +
+        ggplot2::labs(
+          title = title_text,
+          x = "Timestep",
+          y = "Value",
+          color = "Site"
+        ) +
+        ggplot2::theme_bw() +
+        ggplot2::theme(
+          panel.grid.minor = ggplot2::element_blank(),
+          axis.text.x = ggplot2::element_text(angle = 45, hjust = 1)
+        )
+    }
+
+    build_pair_scatter_plot <- function(value_col, x_label, title_text) {
+      keep <- c("timestep", "site_id", "state_var", "residual_xmod_minus_obs_scaled", value_col)
+      keep <- keep[keep %in% names(df)]
+      if (!all(c("timestep", "site_id", "state_var", "residual_xmod_minus_obs_scaled", value_col) %in% keep)) {
+        return(NULL)
+      }
+      d <- df[, keep, drop = FALSE]
+      d <- d[
+        is.finite(d$residual_xmod_minus_obs_scaled) & is.finite(d[[value_col]]),
+        ,
+        drop = FALSE
+      ]
+      if (nrow(d) == 0) {
+        return(NULL)
+      }
+
+      p <- ggplot2::ggplot(
+        d,
+        ggplot2::aes_string(
+          x = value_col,
+          y = "residual_xmod_minus_obs_scaled",
+          color = "timestep"
+        )
+      ) +
+        ggplot2::geom_point(alpha = 0.75, size = 1.6) +
+        ggplot2::facet_wrap(~state_var, scales = "free") +
+        ggplot2::labs(
+          title = title_text,
+          x = x_label,
+          y = "Residual (X.mod - Obs, scaled)",
+          color = "Timestep"
+        ) +
+        ggplot2::theme_bw() +
+        ggplot2::theme(panel.grid.minor = ggplot2::element_blank())
+
+      if (nrow(d) >= 3) {
+        p <- p + ggplot2::geom_smooth(
+          method = "lm",
+          se = FALSE,
+          color = "black",
+          linewidth = 0.6,
+          inherit.aes = FALSE,
+          mapping = ggplot2::aes_string(
+            x = value_col,
+            y = "residual_xmod_minus_obs_scaled"
+          )
+        )
+      }
+      p
+    }
+
+    files <- character(0)
+
+    p_q_time <- build_pair_time_plot(
+      value_col = "q_diag",
+      title_text = "Q and residual over time by state variable",
+      y_label_other = "Q (diag / representative)"
+    )
+    if (!is.null(p_q_time)) {
+      files <- c(files, safe_write_plot(p_q_time, "q_residual_over_time_by_state.png"))
+    }
+
+    p_r_time <- build_pair_time_plot(
+      value_col = "r_diag",
+      title_text = "R and residual over time by state variable",
+      y_label_other = "R (diag)"
+    )
+    if (!is.null(p_r_time)) {
+      files <- c(files, safe_write_plot(p_r_time, "r_residual_over_time_by_state.png"))
+    }
+
+    p_q_scatter <- build_pair_scatter_plot(
+      value_col = "q_diag",
+      x_label = "Q (diag / representative)",
+      title_text = "Residual vs Q by state variable (colored by timestep)"
+    )
+    if (!is.null(p_q_scatter)) {
+      files <- c(files, safe_write_plot(p_q_scatter, "residual_vs_q_scatter_by_state.png"))
+    }
+
+    p_r_scatter <- build_pair_scatter_plot(
+      value_col = "r_diag",
+      x_label = "R (diag)",
+      title_text = "Residual vs R by state variable (colored by timestep)"
+    )
+    if (!is.null(p_r_scatter)) {
+      files <- c(files, safe_write_plot(p_r_scatter, "residual_vs_r_scatter_by_state.png"))
+    }
+
+    files <- files[!is.na(files)]
+    if (verbose && length(files) > 0) {
+      message("Saved plots to: ", normalizePath(plot_dir, mustWork = FALSE))
+    }
+    files
   }
 
   sda_files <- list.files(
@@ -758,6 +955,19 @@ extract_q_r_xmod <- function(outdir,
     }
   }
 
+  plot_files <- character(0)
+  if (isTRUE(write_plots)) {
+    plot_files <- generate_residual_relation_plots(
+      df = results$residual_qr,
+      plot_dir = plot_dir,
+      plot_width = plot_width,
+      plot_height = plot_height,
+      plot_dpi = plot_dpi,
+      verbose = verbose
+    )
+  }
+  results$plot_files <- plot_files
+
   if (verbose) {
     timesteps <- if ("timestep" %in% names(results$xmod)) {
       length(unique(results$xmod$timestep))
@@ -769,6 +979,7 @@ extract_q_r_xmod <- function(outdir,
             ", R diag: ", nrow(results$r_diag),
             ", X.mod: ", nrow(results$xmod),
             ", Residual: ", nrow(results$residual))
+    message("Plot files: ", length(results$plot_files))
   }
 
   results
@@ -792,3 +1003,4 @@ extract_q_r_xmod <- function(outdir,
 # head(out$r_xmod)
 # out$q_xmod_summary
 # out$r_xmod_summary
+# out$plot_files
