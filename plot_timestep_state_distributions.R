@@ -225,37 +225,74 @@ plot_timestep_state_distributions <- function(outdir,
     h_idx <- suppressWarnings(as.integer(block$constant$H))
     muf <- as_named_vector(block$data$muf %||% numeric(), prefix = "state")
     mufa <- as_named_vector(block$update$mufa %||% numeric(), prefix = "state")
-    n_state <- length(muf)
-    if (n_state == 0 || length(y_obs) == 0 || length(h_idx) == 0) {
+
+    n_state <- max(length(muf), length(mufa))
+    if (n_state == 0) {
       next
     }
 
-    n_obs <- min(length(y_obs), length(h_idx))
-    y_obs <- y_obs[seq_len(n_obs)]
-    h_idx <- h_idx[seq_len(n_obs)]
-    valid <- is.finite(h_idx) & h_idx > 0 & h_idx <= n_state
+    state_names <- rep("", n_state)
+    if (length(muf) > 0) {
+      idx <- seq_len(min(length(muf), n_state))
+      state_names[idx] <- names(muf)[idx]
+    }
+    if (length(mufa) > 0) {
+      idx <- seq_len(min(length(mufa), n_state))
+      mufa_names <- names(mufa)[idx]
+      need_fill <- !nzchar(state_names[idx]) | is.na(state_names[idx])
+      state_names[idx][need_fill] <- mufa_names[need_fill]
+    }
+    bad_nm <- !nzchar(state_names) | is.na(state_names)
+    state_names[bad_nm] <- paste0("state_", which(bad_nm))
 
-    state_names <- names(muf)
-    forecast <- rep(NA_real_, n_obs)
-    analysis <- rep(NA_real_, n_obs)
-    forecast[valid] <- suppressWarnings(as.numeric(muf[h_idx[valid]]))
-    analysis[valid] <- suppressWarnings(as.numeric(mufa[h_idx[valid]]))
+    forecast <- rep(NA_real_, n_state)
+    analysis <- rep(NA_real_, n_state)
+    if (length(muf) > 0) {
+      idx <- seq_len(min(length(muf), n_state))
+      forecast[idx] <- suppressWarnings(as.numeric(muf[idx]))
+    }
+    if (length(mufa) > 0) {
+      idx <- seq_len(min(length(mufa), n_state))
+      analysis[idx] <- suppressWarnings(as.numeric(mufa[idx]))
+    }
+
+    obs_state <- rep(NA_real_, n_state)
+    n_obs_mapped <- integer(n_state)
+    if (length(y_obs) > 0 && length(h_idx) > 0) {
+      n_obs <- min(length(y_obs), length(h_idx))
+      y_obs <- y_obs[seq_len(n_obs)]
+      h_idx <- h_idx[seq_len(n_obs)]
+      valid <- is.finite(h_idx) & h_idx > 0 & h_idx <= n_state & is.finite(y_obs)
+      if (any(valid)) {
+        obs_agg <- tapply(y_obs[valid], h_idx[valid], function(v) mean(v, na.rm = TRUE))
+        obs_idx_int <- suppressWarnings(as.integer(names(obs_agg)))
+        obs_ok <- is.finite(obs_idx_int) & obs_idx_int > 0 & obs_idx_int <= n_state
+        if (any(obs_ok)) {
+          obs_state[obs_idx_int[obs_ok]] <- as.numeric(obs_agg[obs_ok])
+        }
+
+        obs_n <- table(h_idx[valid])
+        obs_n_idx <- suppressWarnings(as.integer(names(obs_n)))
+        cnt_ok <- is.finite(obs_n_idx) & obs_n_idx > 0 & obs_n_idx <= n_state
+        if (any(cnt_ok)) {
+          n_obs_mapped[obs_n_idx[cnt_ok]] <- as.integer(obs_n[cnt_ok])
+        }
+      }
+    }
 
     site_ids <- as.character(block$site.ids %||% paste0("block_", b))
     site_map <- make_site_map(site_ids, n_state)
-    state_var <- rep(NA_character_, n_obs)
-    site_id <- rep(NA_character_, n_obs)
-    state_var[valid] <- state_names[h_idx[valid]]
-    site_id[valid] <- site_map[h_idx[valid]]
+    state_idx <- seq_len(n_state)
 
     rows[[length(rows) + 1L]] <- data.frame(
       timestep = timestep,
       block_id = b,
-      obs_idx = seq_len(n_obs),
-      state_idx = h_idx,
-      state_var = state_var,
-      site_id = site_id,
-      obs = y_obs,
+      obs_idx = NA_integer_,
+      state_idx = state_idx,
+      state_var = state_names,
+      site_id = site_map,
+      n_obs_mapped = n_obs_mapped,
+      obs = obs_state,
       forecast = forecast,
       analysis = analysis,
       stringsAsFactors = FALSE
