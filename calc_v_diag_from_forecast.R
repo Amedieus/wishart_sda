@@ -2,6 +2,7 @@ compute_v_diag_from_forecast <- function(outdir = NULL,
                                          forecast_rdata = NULL,
                                          variables = NULL,
                                          normalize = TRUE,
+                                         normalize_mode = c("variable", "site_variable"),
                                          output_csv = NULL,
                                          output_rds = NULL,
                                          verbose = TRUE) {
@@ -129,8 +130,7 @@ compute_v_diag_from_forecast <- function(outdir = NULL,
   dx_raw <- x_t[2:nt, , drop = FALSE] - x_t[1:(nt - 1), , drop = FALSE]
   var_dx_raw_by_key <- apply(dx_raw, 2, safe_var)
 
-  # Unit harmonization: z-score each site-variable trajectory over time.
-  # This avoids mixed-unit domination when aggregating across variables.
+  # Unit harmonization helpers.
   zscore_col <- function(x) {
     x_ok <- x[is.finite(x)]
     mu <- if (length(x_ok) > 0) mean(x_ok) else 0
@@ -140,8 +140,29 @@ compute_v_diag_from_forecast <- function(outdir = NULL,
     (x - mu) / sdv
   }
 
+  normalize_mode <- match.arg(normalize_mode)
   normalize <- isTRUE(normalize)
-  x_used <- if (normalize) apply(x_t, 2, zscore_col) else x_t
+  x_used <- x_t
+  if (normalize) {
+    if (normalize_mode == "site_variable") {
+      # z-score each site-variable trajectory over time.
+      x_used <- apply(x_t, 2, zscore_col)
+    } else if (normalize_mode == "variable") {
+      # z-score by state variable across all sites and timesteps.
+      x_used <- x_t
+      state_by_col <- unname(key_to_var[colnames(x_t)])
+      for (sv in unique(state_by_col)) {
+        idx <- which(state_by_col == sv)
+        vals <- as.vector(x_t[, idx, drop = FALSE])
+        vals <- vals[is.finite(vals)]
+        mu <- if (length(vals) > 0) mean(vals) else 0
+        sdv <- if (length(vals) > 1) stats::sd(vals) else 1
+        if (!is.finite(mu)) mu <- 0
+        if (!is.finite(sdv) || sdv <= 0) sdv <- 1
+        x_used[, idx] <- (x_t[, idx, drop = FALSE] - mu) / sdv
+      }
+    }
+  }
   if (is.vector(x_used)) {
     x_used <- matrix(x_used, nrow = nrow(x_t), ncol = ncol(x_t))
     colnames(x_used) <- colnames(x_t)
@@ -149,28 +170,28 @@ compute_v_diag_from_forecast <- function(outdir = NULL,
   }
 
   dx_used <- x_used[2:nt, , drop = FALSE] - x_used[1:(nt - 1), , drop = FALSE]
-  var_dx_by_key <- apply(dx_used, 2, safe_var)
+  var_dx_norm_by_key <- apply(dx_used, 2, safe_var)
 
   key_tbl <- data.frame(
-    key = names(var_dx_by_key),
-    site_id = unname(key_to_site[names(var_dx_by_key)]),
-    state_var = unname(key_to_var[names(var_dx_by_key)]),
-    var_dx_raw = as.numeric(var_dx_raw_by_key[names(var_dx_by_key)]),
-    var_dx = as.numeric(var_dx_by_key),
+    key = names(var_dx_norm_by_key),
+    site_id = unname(key_to_site[names(var_dx_norm_by_key)]),
+    state_var = unname(key_to_var[names(var_dx_norm_by_key)]),
+    var_dx_raw = as.numeric(var_dx_raw_by_key[names(var_dx_norm_by_key)]),
+    var_dx_norm = as.numeric(var_dx_norm_by_key),
     stringsAsFactors = FALSE
   )
 
-  key_tbl <- key_tbl[is.finite(key_tbl$var_dx), , drop = FALSE]
+  key_tbl <- key_tbl[is.finite(key_tbl$var_dx_norm) & is.finite(key_tbl$var_dx_raw), , drop = FALSE]
   if (nrow(key_tbl) == 0) {
     stop("No finite variance estimates from (x_t - x_{t-1}).")
   }
 
-  var_by_variable <- stats::aggregate(
-    var_dx ~ state_var,
+  var_by_variable_norm <- stats::aggregate(
+    var_dx_norm ~ state_var,
     data = key_tbl,
     FUN = function(x) mean(x, na.rm = TRUE)
   )
-  names(var_by_variable)[names(var_by_variable) == "var_dx"] <- "mean_var_dx"
+  names(var_by_variable_norm)[names(var_by_variable_norm) == "var_dx_norm"] <- "mean_var_dx_norm"
 
   var_by_variable_raw <- stats::aggregate(
     var_dx_raw ~ state_var,
@@ -178,7 +199,7 @@ compute_v_diag_from_forecast <- function(outdir = NULL,
     FUN = function(x) mean(x, na.rm = TRUE)
   )
   names(var_by_variable_raw)[names(var_by_variable_raw) == "var_dx_raw"] <- "mean_var_dx_raw"
-  var_by_variable <- merge(var_by_variable, var_by_variable_raw, by = "state_var", all.x = TRUE)
+  var_by_variable <- merge(var_by_variable_norm, var_by_variable_raw, by = "state_var", all = TRUE)
 
   if (!is.null(variables)) {
     variables <- as.character(variables)
@@ -189,13 +210,22 @@ compute_v_diag_from_forecast <- function(outdir = NULL,
     var_by_variable <- var_by_variable[match(keep, var_by_variable$state_var), , drop = FALSE]
   }
 
-  tau <- mean(var_by_variable$mean_var_dx, na.rm = TRUE)
-  if (!is.finite(tau) || tau <= 0) {
-    stop("Computed tau is non-finite or <= 0; cannot normalize.")
+  tau_raw <- mean(var_by_variable$mean_var_dx_raw, na.rm = TRUE)
+  tau_norm <- mean(var_by_variable$mean_var_dx_norm, na.rm = TRUE)
+  if (!is.finite(tau_raw) || tau_raw <= 0) {
+    stop("Computed tau_raw is non-finite or <= 0; cannot normalize.")
   }
+  if (!is.finite(tau_norm) || tau_norm <= 0) {
+    stop("Computed tau_norm is non-finite or <= 0; cannot normalize.")
+  }
+  tau <- if (normalize) tau_norm else tau_raw
 
+  var_by_variable$tau_raw <- tau_raw
+  var_by_variable$tau_norm <- tau_norm
   var_by_variable$tau <- tau
-  var_by_variable$v_diag <- var_by_variable$mean_var_dx / tau
+  var_by_variable$v_diag_raw <- var_by_variable$mean_var_dx_raw / tau_raw
+  var_by_variable$v_diag_norm <- var_by_variable$mean_var_dx_norm / tau_norm
+  var_by_variable$v_diag <- if (normalize) var_by_variable$v_diag_norm else var_by_variable$v_diag_raw
 
   # optional outputs
   if (!is.null(output_csv)) {
@@ -205,8 +235,13 @@ compute_v_diag_from_forecast <- function(outdir = NULL,
     saveRDS(
       list(
         normalized = normalize,
+        normalize_mode = normalize_mode,
         tau = tau,
+        tau_raw = tau_raw,
+        tau_norm = tau_norm,
         v_diag = stats::setNames(var_by_variable$v_diag, var_by_variable$state_var),
+        v_diag_raw = stats::setNames(var_by_variable$v_diag_raw, var_by_variable$state_var),
+        v_diag_norm = stats::setNames(var_by_variable$v_diag_norm, var_by_variable$state_var),
         by_variable = var_by_variable,
         by_site_variable = key_tbl
       ),
@@ -217,11 +252,13 @@ compute_v_diag_from_forecast <- function(outdir = NULL,
   if (isTRUE(verbose)) {
     message("Timesteps: ", nt, " (pairs: ", nt - 1, ")")
     if (normalize) {
-      message("Using normalized trajectories (z-score by site-variable over time).")
-      message("Tau (mean variance of normalized x_t - x_{t-1}): ", signif(tau, 6))
+      message("Using normalized trajectories (mode = ", normalize_mode, ").")
+      message("Tau_norm (mean variance of normalized x_t - x_{t-1}): ", signif(tau_norm, 6))
+      message("Tau_raw  (mean variance of raw x_t - x_{t-1}): ", signif(tau_raw, 6))
     } else {
       message("Using raw trajectories (no normalization).")
-      message("Tau (mean variance of raw x_t - x_{t-1}): ", signif(tau, 6))
+      message("Tau_raw (mean variance of raw x_t - x_{t-1}): ", signif(tau_raw, 6))
+      message("Tau_norm (for reference): ", signif(tau_norm, 6))
     }
     message("v_diag:")
     for (i in seq_len(nrow(var_by_variable))) {
@@ -231,8 +268,13 @@ compute_v_diag_from_forecast <- function(outdir = NULL,
 
   invisible(list(
     normalized = normalize,
+    normalize_mode = normalize_mode,
     tau = tau,
+    tau_raw = tau_raw,
+    tau_norm = tau_norm,
     v_diag = stats::setNames(var_by_variable$v_diag, var_by_variable$state_var),
+    v_diag_raw = stats::setNames(var_by_variable$v_diag_raw, var_by_variable$state_var),
+    v_diag_norm = stats::setNames(var_by_variable$v_diag_norm, var_by_variable$state_var),
     by_variable = var_by_variable,
     by_site_variable = key_tbl
   ))
@@ -265,12 +307,14 @@ if (sys.nframe() == 0) {
 
   vars_raw <- get_arg("variables", NULL)
   vars <- if (is.null(vars_raw)) NULL else strsplit(vars_raw, ",", fixed = TRUE)[[1]]
+  normalize_mode <- get_arg("normalize_mode", "variable")
 
   compute_v_diag_from_forecast(
     outdir = get_arg("outdir", NULL),
     forecast_rdata = get_arg("forecast_rdata", NULL),
     variables = vars,
     normalize = parse_bool(get_arg("normalize", "true"), TRUE),
+    normalize_mode = normalize_mode,
     output_csv = get_arg("output_csv", NULL),
     output_rds = get_arg("output_rds", NULL),
     verbose = TRUE
