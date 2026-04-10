@@ -34,7 +34,7 @@ load("/projectnb/dietzelab/guYANG/pecan/runners/test10/pecan_flux.RData")
 
 #### Fix the multi output in one timestep bug
 settings$model$jobtemplate <- "/projectnb/dietzelab/guYANG/pecan/runners/test7/sipnet_template.job"
-settings$outdir <- "/projectnb/dietzelab/guYANG/pecan/runners/wishart_sda/output/"
+settings$outdir <- "/projectnb/dietzelab/guYANG/pecan/runners/wishart_sda/output_inter_q/"
 settings$host$prerun <- "module load R/4.4.0"
 
 # setup the batch job settings.
@@ -122,10 +122,26 @@ for (i in 1:length(obs.mean)) {
 # load PFT parameter file.
 load("/projectnb/dietzelab/dongchen/anchorSites/NA_runs/SDA_8k_site/samples.Rdata") ### Revised
 
-settings$rundir <- "/projectnb/dietzelab/guYANG/pecan/runners/wishart_sda/output/run"
+settings$rundir <- "/projectnb/dietzelab/guYANG/pecan/runners/wishart_sda/output_inter_q/run"
 
 ###### Change Q type
 settings$state.data.assimilation$q.type <- "wishart"
+
+###### free run or not?
+# settings$state.data.assimilation$free.run <- "TRUE"
+# obs.mean <- lapply(obs.mean, function(x) {
+#   setNames(
+#     vector("list", length(x)),  
+#     names(x)
+#   )
+# })
+# 
+# obs.cov <- lapply(obs.cov, function(x) {
+#   setNames(
+#     vector("list", length(x)),
+#     names(x)
+#   )
+# })
 
 ##########Problems update:
 source("/projectnb/dietzelab/guYANG/pecan/runners/wishart_sda/wishart_sda/functions_normalize.R")
@@ -136,7 +152,7 @@ sda.forecast.local(settings = settings,
                    Q = NULL,
                    pre_enkf_params = NULL,
                    ensemble.samples = ensemble.samples,
-                   outdir = "/projectnb/dietzelab/guYANG/pecan/runners/wishart_sda/output/",
+                   outdir = "/projectnb/dietzelab/guYANG/pecan/runners/wishart_sda/output_inter_q/",
                    control = list(TimeseriesPlot = FALSE,
                                   OutlierDetection=FALSE,
                                   send_email = NULL,

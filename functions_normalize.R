@@ -2676,7 +2676,7 @@ update_q <- function (block.list.all, t, nt, aqq.Init = NULL, bqq.Init = NULL, M
           
           # Use the manually specified diagonal + correlation structure at t = 1.
           # This does NOT use aq/bq from settings.
-          v_diag <- c(0.1, 2.0, 2.0, 0.5, 2.0, 0.2)
+          v_diag <- c(0.02, 0.2, 0.2, 0.05, 0.2, 0.02)
           
           if (nvar != length(v_diag)) {
             stop(paste0(
