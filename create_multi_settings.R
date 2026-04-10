@@ -321,10 +321,30 @@ template <- PEcAn.settings::Settings(list(
 sitegroupId <- 1000000033
 nSite <- 330
 
-multiRunSettings <- PEcAn.settings::createSitegroupMultiSettings(
-  template,
-  sitegroupId = sitegroupId,
-  nSite = nSite)
+sitegroup_result <- tryCatch(
+  {
+    list(
+      success = TRUE,
+      settings = PEcAn.settings::createSitegroupMultiSettings(
+        template,
+        sitegroupId = sitegroupId,
+        nSite = nSite
+      ),
+      error = NULL
+    )
+  },
+  error = function(e) {
+    warning(
+      paste0(
+        "BETY is unavailable or sitegroup lookup failed (", e$message, "). ",
+        "Writing template settings without sitegroup expansion."
+      )
+    )
+    list(success = FALSE, settings = template, error = e)
+  }
+)
+
+multiRunSettings <- sitegroup_result$settings
 if(file.exists(XML_out_dir)){
   unlink(XML_out_dir)
 }
@@ -341,47 +361,76 @@ writeChar(tmp, XML_out_dir)
 settings <- PEcAn.settings::read.settings(XML_out_dir)
 
 #add Lat and Lon to each site
-#grab Site IDs from settings
-site_ID <- c()
-for (i in 1:length(settings)) {
-  obs <- settings[[i]]$run$site$id
-  site_ID <- c(site_ID,obs)
-}
-#query site info
-#open a connection to bety and grab site info based on site IDs
-con <- PEcAn.DB::db.open(settings$database$bety)
-site_info <- db.query(paste("SELECT *, ST_X(ST_CENTROID(geometry)) AS lon,
-                                      ST_Y(ST_CENTROID(geometry)) AS lat 
-                           FROM sites WHERE id IN (",paste(site_ID,collapse=", "),")"),con = con)
-
-#write Lat and Lon into the settings
-for (i in 1:nSite) {
-  temp_ID <- settings[[i]]$run$site$id
-  index_site_info <- which(site_info$id==temp_ID)
-  settings[[i]]$run$site$lat <- site_info$lat[index_site_info]
-  settings[[i]]$run$site$lon <- site_info$lon[index_site_info]
-  settings[[i]]$run$site$name <- site_info$sitename[index_site_info]#temp_ID
-}
-
-#remove overlapped sites
-site.locs <- settings$run %>% 
-  purrr::map('site') %>% 
-  purrr::map_dfr(~c(.x[['lon']],.x[['lat']]) %>% as.numeric)%>% 
-  t %>%
-  `colnames<-`(c("lon","lat")) %>% data.frame
-del.ind <- c()
-for (i in 1:nrow(site.locs)) {
-  for (j in i:nrow(site.locs)) {
-    if (i == j) {
-      next
-    }
-    if (site.locs$lon[i] == site.locs$lon[j] &&
-        site.locs$lat[i] == site.locs$lat[j]) {
-      del.ind <- c(del.ind, j)
-    }
+if (isTRUE(sitegroup_result$success)) {
+  #grab Site IDs from settings
+  site_ID <- c()
+  for (i in 1:length(settings)) {
+    obs <- settings[[i]]$run$site$id
+    site_ID <- c(site_ID,obs)
   }
+  
+  #query site info
+  #open a connection to bety and grab site info based on site IDs
+  site_info_result <- tryCatch(
+    {
+      con <- PEcAn.DB::db.open(settings$database$bety)
+      on.exit(PEcAn.DB::db.close(con), add = TRUE)
+      site_info <- PEcAn.DB::db.query(
+        paste(
+          "SELECT *, ST_X(ST_CENTROID(geometry)) AS lon,",
+          "ST_Y(ST_CENTROID(geometry)) AS lat",
+          "FROM sites WHERE id IN (", paste(site_ID, collapse = ", "), ")"
+        ),
+        con = con
+      )
+      list(success = TRUE, site_info = site_info, error = NULL)
+    },
+    error = function(e) {
+      warning(
+        paste0(
+          "Skipping BETY site metadata query: ", e$message,
+          ". Settings are still written with BETY structure unchanged."
+        )
+      )
+      list(success = FALSE, site_info = NULL, error = e)
+    }
+  )
+  
+  if (isTRUE(site_info_result$success)) {
+    site_info <- site_info_result$site_info
+    
+    #write Lat and Lon into the settings
+    for (i in 1:nSite) {
+      temp_ID <- settings[[i]]$run$site$id
+      index_site_info <- which(site_info$id==temp_ID)
+      settings[[i]]$run$site$lat <- site_info$lat[index_site_info]
+      settings[[i]]$run$site$lon <- site_info$lon[index_site_info]
+      settings[[i]]$run$site$name <- site_info$sitename[index_site_info]#temp_ID
+    }
+    
+    #remove overlapped sites
+    site.locs <- settings$run %>% 
+      purrr::map('site') %>% 
+      purrr::map_dfr(~c(.x[['lon']],.x[['lat']]) %>% as.numeric)%>% 
+      t %>%
+      `colnames<-`(c("lon","lat")) %>% data.frame
+    del.ind <- c()
+    for (i in 1:nrow(site.locs)) {
+      for (j in i:nrow(site.locs)) {
+        if (i == j) {
+          next
+        }
+        if (site.locs$lon[i] == site.locs$lon[j] &&
+            site.locs$lat[i] == site.locs$lat[j]) {
+          del.ind <- c(del.ind, j)
+        }
+      }
+    }
+    settings <- settings[-del.ind]
+  }
+} else {
+  warning("Skipping BETY-dependent site metadata steps because sitegroup settings were not created.")
 }
-settings <- settings[-del.ind]
 
 #####
 unlink(paste0(settings$outdir,"/pecan.xml"))
