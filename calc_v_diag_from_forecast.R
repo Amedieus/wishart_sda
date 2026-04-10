@@ -84,6 +84,7 @@ compute_v_diag_from_forecast <- function(outdir = NULL,
 
   key_to_var <- character(0)
   key_to_site <- character(0)
+  state_order <- character(0)
   mean_vectors <- vector("list", nt)
 
   for (t in seq_len(nt)) {
@@ -96,6 +97,8 @@ compute_v_diag_from_forecast <- function(outdir = NULL,
       colnames(f_mat) <- paste0("state_", seq_len(ncol(f_mat)))
     }
     var_names <- colnames(f_mat)
+    vars_in_t <- unique(var_names)
+    state_order <- c(state_order, vars_in_t[!vars_in_t %in% state_order])
 
     site_attr <- attr(forecast_list[[t]], "Site")
     if (is.null(site_attr) || length(site_attr) != ncol(f_mat)) {
@@ -208,6 +211,10 @@ compute_v_diag_from_forecast <- function(outdir = NULL,
       stop("None of the provided 'variables' were found in forecast columns.")
     }
     var_by_variable <- var_by_variable[match(keep, var_by_variable$state_var), , drop = FALSE]
+  } else {
+    # Preserve state order from forecast columns (not alphabetical merge order).
+    keep_order <- state_order[state_order %in% var_by_variable$state_var]
+    var_by_variable <- var_by_variable[match(keep_order, var_by_variable$state_var), , drop = FALSE]
   }
 
   tau_raw <- mean(var_by_variable$mean_var_dx_raw, na.rm = TRUE)
