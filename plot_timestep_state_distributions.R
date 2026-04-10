@@ -524,7 +524,7 @@ if (sys.nframe() == 0) {
 #
 # Example 2: resolve timestep from bad-point rank/index
 # Rscript plot_timestep_state_distributions.R \
-#   --outdir=/path/to/output_inter_q \
-#   --index=1 \
-#   --bad_points_csv=/path/to/output_inter_q/bad_assimilation_diagnostics/bad_assimilation_points.csv \
+#   --outdir=/projectnb/dietzelab/guYANG/pecan/runners/wishart_sda/output_inter_q_2 \
+#   --index=6 \
+#   --bad_points_csv=/projectnb/dietzelab/guYANG/pecan/runners/wishart_sda/output_inter_q_2/bad_assimilation_diagnostics/bad_assimilation_points.csv \
 #   --index_column=rank
