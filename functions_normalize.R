@@ -1676,25 +1676,33 @@ analysis_sda_block <- function (settings, block.list.all, X, obs.mean, obs.cov,
     }
     
     q_next_lambda <- suppressWarnings(as.numeric(settings$state.data.assimilation$q.next.lambda))
-    if (!is.finite(q_next_lambda)) {
+    if (length(q_next_lambda) == 0 || !is.finite(q_next_lambda[1])) {
       q_next_lambda <- 1.0
+    } else {
+      q_next_lambda <- q_next_lambda[1]
     }
     q_next_lambda <- max(0, min(1, q_next_lambda))
     
     q_df_strength_factor <- suppressWarnings(as.numeric(settings$state.data.assimilation$q.df.strength.factor))
-    if (!is.finite(q_df_strength_factor)) {
+    if (length(q_df_strength_factor) == 0 || !is.finite(q_df_strength_factor[1])) {
       q_df_strength_factor <- 2.0
+    } else {
+      q_df_strength_factor <- q_df_strength_factor[1]
     }
     
     q_df_min_offset <- suppressWarnings(as.numeric(settings$state.data.assimilation$q.df.min.offset))
-    if (!is.finite(q_df_min_offset)) {
+    if (length(q_df_min_offset) == 0 || !is.finite(q_df_min_offset[1])) {
       q_df_min_offset <- 2.0
+    } else {
+      q_df_min_offset <- q_df_min_offset[1]
     }
     q_df_min_offset <- max(0, q_df_min_offset)
     
     q_df_next_override <- suppressWarnings(as.numeric(settings$state.data.assimilation$q.df.next))
-    if (!is.finite(q_df_next_override)) {
+    if (length(q_df_next_override) == 0 || !is.finite(q_df_next_override[1])) {
       q_df_next_override <- NA_real_
+    } else {
+      q_df_next_override <- q_df_next_override[1]
     }
     
     block.list.all[[t]] <- purrr::map(block.list.all[[t]], function(l) {
