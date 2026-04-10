@@ -1657,17 +1657,20 @@ analysis_sda_block <- function (settings, block.list.all, X, obs.mean, obs.cov,
   if (t < nt) {
     make_spd <- function(M, jitter = 1e-6) {
       if (is.null(M) || is.null(dim(M))) {
-        return(M)
+        return(NULL)
       }
       M <- as.matrix(M)
-      M <- (M + t(M)) / 2
-      if (any(!is.finite(M))) {
-        return(M)
+      if (nrow(M) != ncol(M)) {
+        return(NULL)
       }
+      if (any(!is.finite(M))) {
+        return(NULL)
+      }
+      M <- (M + t(M)) / 2
       ev <- eigen(M, symmetric = TRUE, only.values = TRUE)$values
       min_ev <- min(ev)
       if (!is.finite(min_ev)) {
-        return(M)
+        return(NULL)
       }
       if (min_ev <= jitter) {
         M <- M + diag(abs(min_ev) + jitter, nrow(M))
@@ -1692,7 +1695,7 @@ analysis_sda_block <- function (settings, block.list.all, X, obs.mean, obs.cov,
     
     q_df_min_offset <- suppressWarnings(as.numeric(settings$state.data.assimilation$q.df.min.offset))
     if (length(q_df_min_offset) == 0 || !is.finite(q_df_min_offset[1])) {
-      q_df_min_offset <- 2.0
+      q_df_min_offset <- 15.0
     } else {
       q_df_min_offset <- q_df_min_offset[1]
     }
@@ -1741,6 +1744,9 @@ analysis_sda_block <- function (settings, block.list.all, X, obs.mean, obs.cov,
         return(l)
       }
       q_post <- make_spd(q_post)
+      if (is.null(q_post)) {
+        return(l)
+      }
       
       df_curr <- suppressWarnings(as.numeric(l$bqq[t]))
       if (!is.finite(df_curr) || df_curr <= 0) {
@@ -1750,19 +1756,32 @@ analysis_sda_block <- function (settings, block.list.all, X, obs.mean, obs.cov,
       sigma_curr_full <- l$aqq[, , t]
       sigma_curr_obs <- GrabFillMatrix(sigma_curr_full, h_idx)
       q_prior_obs_mean <- make_spd(sigma_curr_obs * df_curr)
+      if (is.null(q_prior_obs_mean)) {
+        return(l)
+      }
       
       q_target_obs_mean <- make_spd((1 - q_next_lambda) * q_prior_obs_mean + q_next_lambda * q_post)
+      if (is.null(q_target_obs_mean)) {
+        return(l)
+      }
       
+      # Keep df conservative by default (matches legacy stronger prior style).
       df_next <- max(length(h_idx) + q_df_min_offset,
-                     ceiling(q_df_strength_factor * length(h_idx)))
+                     ceiling(q_df_strength_factor * length(h_idx) + q_df_min_offset))
       if (is.finite(q_df_next_override) && q_df_next_override > (length(h_idx) - 1)) {
         df_next <- q_df_next_override
       }
       
       sigma_next_obs <- make_spd(q_target_obs_mean / df_next)
+      if (is.null(sigma_next_obs)) {
+        return(l)
+      }
       sigma_next_full <- sigma_curr_full
       sigma_next_full[h_idx, h_idx] <- sigma_next_obs
       sigma_next_full <- make_spd(sigma_next_full)
+      if (is.null(sigma_next_full)) {
+        return(l)
+      }
       
       l$aqq[, , t + 1] <- sigma_next_full
       l$bqq[t + 1] <- df_next
@@ -2503,8 +2522,12 @@ MCMC_block_function <- function(block) {
           n_side <- as.integer(round(sqrt(length(q_vec))))
         }
         if (!is.na(n_side) && n_side > 0 && n_side * n_side == length(q_vec)) {
-          q_mat <- matrix(q_vec, nrow = n_side, ncol = n_side, byrow = TRUE)
+          # Use column-major fill to align with R/Nimble vectorization conventions.
+          q_mat <- matrix(q_vec, nrow = n_side, ncol = n_side, byrow = FALSE)
           q_mat <- (q_mat + t(q_mat)) / 2
+          if (any(!is.finite(q_mat))) {
+            return(NULL)
+          }
           return(q_mat)
         }
       }
@@ -2527,7 +2550,18 @@ MCMC_block_function <- function(block) {
       q_mat[rows[k], cols[k]] <- mean(q_samples[, k], na.rm = TRUE)
     }
     if (nr == nc) {
+      # If only one triangle is present, mirror it before symmetrization.
+      for (ii in seq_len(nr)) {
+        for (jj in seq_len(nc)) {
+          if (!is.finite(q_mat[ii, jj]) && is.finite(q_mat[jj, ii])) {
+            q_mat[ii, jj] <- q_mat[jj, ii]
+          }
+        }
+      }
       q_mat <- (q_mat + t(q_mat)) / 2
+    }
+    if (any(!is.finite(q_mat))) {
+      return(NULL)
     }
     q_mat
   }
