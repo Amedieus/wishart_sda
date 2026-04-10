@@ -1,6 +1,7 @@
 compute_v_diag_from_forecast <- function(outdir = NULL,
                                          forecast_rdata = NULL,
                                          variables = NULL,
+                                         normalize = TRUE,
                                          output_csv = NULL,
                                          output_rds = NULL,
                                          verbose = TRUE) {
@@ -124,13 +125,37 @@ compute_v_diag_from_forecast <- function(outdir = NULL,
     x_t[t, names(v)] <- as.numeric(v)
   }
 
-  dx <- x_t[2:nt, , drop = FALSE] - x_t[1:(nt - 1), , drop = FALSE]
-  var_dx_by_key <- apply(dx, 2, safe_var)
+  # Keep raw-difference variances for diagnostics/reference.
+  dx_raw <- x_t[2:nt, , drop = FALSE] - x_t[1:(nt - 1), , drop = FALSE]
+  var_dx_raw_by_key <- apply(dx_raw, 2, safe_var)
+
+  # Unit harmonization: z-score each site-variable trajectory over time.
+  # This avoids mixed-unit domination when aggregating across variables.
+  zscore_col <- function(x) {
+    x_ok <- x[is.finite(x)]
+    mu <- if (length(x_ok) > 0) mean(x_ok) else 0
+    sdv <- if (length(x_ok) > 1) stats::sd(x_ok) else 1
+    if (!is.finite(mu)) mu <- 0
+    if (!is.finite(sdv) || sdv <= 0) sdv <- 1
+    (x - mu) / sdv
+  }
+
+  normalize <- isTRUE(normalize)
+  x_used <- if (normalize) apply(x_t, 2, zscore_col) else x_t
+  if (is.vector(x_used)) {
+    x_used <- matrix(x_used, nrow = nrow(x_t), ncol = ncol(x_t))
+    colnames(x_used) <- colnames(x_t)
+    rownames(x_used) <- rownames(x_t)
+  }
+
+  dx_used <- x_used[2:nt, , drop = FALSE] - x_used[1:(nt - 1), , drop = FALSE]
+  var_dx_by_key <- apply(dx_used, 2, safe_var)
 
   key_tbl <- data.frame(
     key = names(var_dx_by_key),
     site_id = unname(key_to_site[names(var_dx_by_key)]),
     state_var = unname(key_to_var[names(var_dx_by_key)]),
+    var_dx_raw = as.numeric(var_dx_raw_by_key[names(var_dx_by_key)]),
     var_dx = as.numeric(var_dx_by_key),
     stringsAsFactors = FALSE
   )
@@ -146,6 +171,14 @@ compute_v_diag_from_forecast <- function(outdir = NULL,
     FUN = function(x) mean(x, na.rm = TRUE)
   )
   names(var_by_variable)[names(var_by_variable) == "var_dx"] <- "mean_var_dx"
+
+  var_by_variable_raw <- stats::aggregate(
+    var_dx_raw ~ state_var,
+    data = key_tbl,
+    FUN = function(x) mean(x, na.rm = TRUE)
+  )
+  names(var_by_variable_raw)[names(var_by_variable_raw) == "var_dx_raw"] <- "mean_var_dx_raw"
+  var_by_variable <- merge(var_by_variable, var_by_variable_raw, by = "state_var", all.x = TRUE)
 
   if (!is.null(variables)) {
     variables <- as.character(variables)
@@ -171,6 +204,7 @@ compute_v_diag_from_forecast <- function(outdir = NULL,
   if (!is.null(output_rds)) {
     saveRDS(
       list(
+        normalized = normalize,
         tau = tau,
         v_diag = stats::setNames(var_by_variable$v_diag, var_by_variable$state_var),
         by_variable = var_by_variable,
@@ -182,7 +216,13 @@ compute_v_diag_from_forecast <- function(outdir = NULL,
 
   if (isTRUE(verbose)) {
     message("Timesteps: ", nt, " (pairs: ", nt - 1, ")")
-    message("Tau (mean variance of x_t - x_{t-1}): ", signif(tau, 6))
+    if (normalize) {
+      message("Using normalized trajectories (z-score by site-variable over time).")
+      message("Tau (mean variance of normalized x_t - x_{t-1}): ", signif(tau, 6))
+    } else {
+      message("Using raw trajectories (no normalization).")
+      message("Tau (mean variance of raw x_t - x_{t-1}): ", signif(tau, 6))
+    }
     message("v_diag:")
     for (i in seq_len(nrow(var_by_variable))) {
       message("  ", var_by_variable$state_var[i], " = ", signif(var_by_variable$v_diag[i], 6))
@@ -190,6 +230,7 @@ compute_v_diag_from_forecast <- function(outdir = NULL,
   }
 
   invisible(list(
+    normalized = normalize,
     tau = tau,
     v_diag = stats::setNames(var_by_variable$v_diag, var_by_variable$state_var),
     by_variable = var_by_variable,
@@ -212,6 +253,16 @@ if (sys.nframe() == 0) {
     val
   }
 
+  parse_bool <- function(x, default = TRUE) {
+    if (is.null(x) || !nzchar(x)) {
+      return(default)
+    }
+    x <- tolower(trimws(x))
+    if (x %in% c("1", "true", "t", "yes", "y")) return(TRUE)
+    if (x %in% c("0", "false", "f", "no", "n")) return(FALSE)
+    default
+  }
+
   vars_raw <- get_arg("variables", NULL)
   vars <- if (is.null(vars_raw)) NULL else strsplit(vars_raw, ",", fixed = TRUE)[[1]]
 
@@ -219,6 +270,7 @@ if (sys.nframe() == 0) {
     outdir = get_arg("outdir", NULL),
     forecast_rdata = get_arg("forecast_rdata", NULL),
     variables = vars,
+    normalize = parse_bool(get_arg("normalize", "true"), TRUE),
     output_csv = get_arg("output_csv", NULL),
     output_rds = get_arg("output_rds", NULL),
     verbose = TRUE
