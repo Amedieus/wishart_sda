@@ -2676,7 +2676,7 @@ update_q <- function (block.list.all, t, nt, aqq.Init = NULL, bqq.Init = NULL, M
           
           # Use the manually specified diagonal + correlation structure at t = 1.
           # This does NOT use aq/bq from settings.
-          v_diag <- c(0.02, 0.2, 0.2, 0.05, 0.2, 0.02)
+          v_diag <- c(0.00369357, 1.48976, 1.44094, 0.414732, 2.64728, 0.00359769)
           
           if (nvar != length(v_diag)) {
             stop(paste0(
@@ -2695,11 +2695,12 @@ update_q <- function (block.list.all, t, nt, aqq.Init = NULL, bqq.Init = NULL, M
           # 4 LAI
           # 5 SoilMoistFrac
           # 6 TotSoilCarb
-          R0[2,3] <- R0[3,2] <- 0.30
-          R0[3,5] <- R0[5,3] <- 0.35
-          R0[1,4] <- R0[4,1] <- 0.10
-          R0[1,6] <- R0[6,1] <- 0.10
-          R0[4,5] <- R0[5,4] <- 0.15
+          R0[2,3] <- R0[3,2] <- 0.17398
+          R0[2,4] <- R0[4,2] <- -0.12659
+          R0[2,5] <- R0[5,2] <- 0.272991
+          R0[3,4] <- R0[4,3] <- 0.177912
+          R0[3,5] <- R0[5,3] <- 0.27308
+          R0[4,5] <- R0[5,4] <- -0.00000000000038
           
           sd_vec <- sqrt(v_diag)
           Dmat <- diag(sd_vec)

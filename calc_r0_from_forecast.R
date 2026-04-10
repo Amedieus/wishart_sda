@@ -417,3 +417,7 @@ if (sys.nframe() == 0) {
     verbose = TRUE
   )
 }
+
+res <- compute_r0_from_forecast(
+  outdir = "/projectnb/dietzelab/guYANG/pecan/runners/wishart_sda/output_forecast"
+)
