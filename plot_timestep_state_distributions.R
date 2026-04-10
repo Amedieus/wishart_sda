@@ -6,12 +6,31 @@ plot_timestep_state_distributions <- function(outdir,
                                               output_dir = file.path(outdir, "timestep_distribution_plots"),
                                               prefix = NULL,
                                               bins = 30,
+                                              site_ids = NULL,
+                                              facet_mode = c("site_state", "state", "site"),
                                               max_states = 0,
+                                              max_facets = 0,
                                               verbose = TRUE) {
   `%||%` <- function(x, y) if (is.null(x)) y else x
 
   parse_timestep <- function(path) {
     as.integer(sub("^sda\\.output([0-9]+)\\.Rdata$", "\\1", basename(path)))
+  }
+
+  parse_csv_values <- function(x) {
+    if (is.null(x)) {
+      return(NULL)
+    }
+    if (length(x) > 1) {
+      x <- paste(x, collapse = ",")
+    }
+    x <- trimws(as.character(x))
+    if (!nzchar(x)) {
+      return(NULL)
+    }
+    vals <- strsplit(x, ",", fixed = TRUE)[[1]]
+    vals <- trimws(vals)
+    vals[nzchar(vals)]
   }
 
   as_named_vector <- function(x, prefix = "state") {
@@ -225,37 +244,74 @@ plot_timestep_state_distributions <- function(outdir,
     h_idx <- suppressWarnings(as.integer(block$constant$H))
     muf <- as_named_vector(block$data$muf %||% numeric(), prefix = "state")
     mufa <- as_named_vector(block$update$mufa %||% numeric(), prefix = "state")
-    n_state <- length(muf)
-    if (n_state == 0 || length(y_obs) == 0 || length(h_idx) == 0) {
+
+    n_state <- max(length(muf), length(mufa))
+    if (n_state == 0) {
       next
     }
 
-    n_obs <- min(length(y_obs), length(h_idx))
-    y_obs <- y_obs[seq_len(n_obs)]
-    h_idx <- h_idx[seq_len(n_obs)]
-    valid <- is.finite(h_idx) & h_idx > 0 & h_idx <= n_state
+    state_names <- rep("", n_state)
+    if (length(muf) > 0) {
+      idx <- seq_len(min(length(muf), n_state))
+      state_names[idx] <- names(muf)[idx]
+    }
+    if (length(mufa) > 0) {
+      idx <- seq_len(min(length(mufa), n_state))
+      mufa_names <- names(mufa)[idx]
+      need_fill <- !nzchar(state_names[idx]) | is.na(state_names[idx])
+      state_names[idx][need_fill] <- mufa_names[need_fill]
+    }
+    bad_nm <- !nzchar(state_names) | is.na(state_names)
+    state_names[bad_nm] <- paste0("state_", which(bad_nm))
 
-    state_names <- names(muf)
-    forecast <- rep(NA_real_, n_obs)
-    analysis <- rep(NA_real_, n_obs)
-    forecast[valid] <- suppressWarnings(as.numeric(muf[h_idx[valid]]))
-    analysis[valid] <- suppressWarnings(as.numeric(mufa[h_idx[valid]]))
+    forecast <- rep(NA_real_, n_state)
+    analysis <- rep(NA_real_, n_state)
+    if (length(muf) > 0) {
+      idx <- seq_len(min(length(muf), n_state))
+      forecast[idx] <- suppressWarnings(as.numeric(muf[idx]))
+    }
+    if (length(mufa) > 0) {
+      idx <- seq_len(min(length(mufa), n_state))
+      analysis[idx] <- suppressWarnings(as.numeric(mufa[idx]))
+    }
+
+    obs_state <- rep(NA_real_, n_state)
+    n_obs_mapped <- integer(n_state)
+    if (length(y_obs) > 0 && length(h_idx) > 0) {
+      n_obs <- min(length(y_obs), length(h_idx))
+      y_obs <- y_obs[seq_len(n_obs)]
+      h_idx <- h_idx[seq_len(n_obs)]
+      valid <- is.finite(h_idx) & h_idx > 0 & h_idx <= n_state & is.finite(y_obs)
+      if (any(valid)) {
+        obs_agg <- tapply(y_obs[valid], h_idx[valid], function(v) mean(v, na.rm = TRUE))
+        obs_idx_int <- suppressWarnings(as.integer(names(obs_agg)))
+        obs_ok <- is.finite(obs_idx_int) & obs_idx_int > 0 & obs_idx_int <= n_state
+        if (any(obs_ok)) {
+          obs_state[obs_idx_int[obs_ok]] <- as.numeric(obs_agg[obs_ok])
+        }
+
+        obs_n <- table(h_idx[valid])
+        obs_n_idx <- suppressWarnings(as.integer(names(obs_n)))
+        cnt_ok <- is.finite(obs_n_idx) & obs_n_idx > 0 & obs_n_idx <= n_state
+        if (any(cnt_ok)) {
+          n_obs_mapped[obs_n_idx[cnt_ok]] <- as.integer(obs_n[cnt_ok])
+        }
+      }
+    }
 
     site_ids <- as.character(block$site.ids %||% paste0("block_", b))
     site_map <- make_site_map(site_ids, n_state)
-    state_var <- rep(NA_character_, n_obs)
-    site_id <- rep(NA_character_, n_obs)
-    state_var[valid] <- state_names[h_idx[valid]]
-    site_id[valid] <- site_map[h_idx[valid]]
+    state_idx <- seq_len(n_state)
 
     rows[[length(rows) + 1L]] <- data.frame(
       timestep = timestep,
       block_id = b,
-      obs_idx = seq_len(n_obs),
-      state_idx = h_idx,
-      state_var = state_var,
-      site_id = site_id,
-      obs = y_obs,
+      obs_idx = NA_integer_,
+      state_idx = state_idx,
+      state_var = state_names,
+      site_id = site_map,
+      n_obs_mapped = n_obs_mapped,
+      obs = obs_state,
       forecast = forecast,
       analysis = analysis,
       stringsAsFactors = FALSE
@@ -271,6 +327,22 @@ plot_timestep_state_distributions <- function(outdir,
   points_df <- points_df[keep, , drop = FALSE]
   if (nrow(points_df) == 0) {
     stop("No finite obs/forecast/analysis values extracted.")
+  }
+
+  points_df$site_id <- as.character(points_df$site_id)
+  points_df$site_id[is.na(points_df$site_id) | !nzchar(points_df$site_id)] <- "unknown_site"
+  points_df$state_var <- as.character(points_df$state_var)
+  points_df$state_var[is.na(points_df$state_var) | !nzchar(points_df$state_var)] <- "unknown_state"
+
+  requested_sites <- parse_csv_values(site_ids)
+  if (!is.null(requested_sites) && length(requested_sites) > 0) {
+    points_df <- points_df[points_df$site_id %in% requested_sites, , drop = FALSE]
+    if (nrow(points_df) == 0) {
+      stop(
+        "No rows remained after site filter. Requested site_ids: ",
+        paste(requested_sites, collapse = ", ")
+      )
+    }
   }
 
   long_df <- rbind(
@@ -311,17 +383,68 @@ plot_timestep_state_distributions <- function(outdir,
     stop("No finite values available for plotting.")
   }
 
-  if (!("state_var" %in% names(long_df))) {
-    long_df$state_var <- "unknown"
-  }
-  long_df$state_var[is.na(long_df$state_var) | !nzchar(long_df$state_var)] <- "unknown"
+  long_df$site_id <- as.character(long_df$site_id)
+  long_df$site_id[is.na(long_df$site_id) | !nzchar(long_df$site_id)] <- "unknown_site"
+  long_df$state_var <- as.character(long_df$state_var)
+  long_df$state_var[is.na(long_df$state_var) | !nzchar(long_df$state_var)] <- "unknown_state"
 
-  state_levels <- names(sort(table(long_df$state_var), decreasing = TRUE))
-  if (is.finite(max_states) && max_states > 0 && length(state_levels) > max_states) {
-    state_levels <- state_levels[seq_len(max_states)]
-    long_df <- long_df[long_df$state_var %in% state_levels, , drop = FALSE]
+  # Optionally keep only the most represented state variables.
+  state_levels_all <- names(sort(table(long_df$state_var), decreasing = TRUE))
+  if (is.finite(max_states) && max_states > 0 && length(state_levels_all) > max_states) {
+    keep_states <- state_levels_all[seq_len(max_states)]
+    long_df <- long_df[long_df$state_var %in% keep_states, , drop = FALSE]
   }
+  if (nrow(long_df) == 0) {
+    stop("No rows remained after max_states filtering.")
+  }
+  state_levels <- names(sort(table(long_df$state_var), decreasing = TRUE))
   long_df$state_var <- factor(long_df$state_var, levels = state_levels)
+
+  long_df$facet_site <- as.character(long_df$site_id)
+  long_df$facet_state <- as.character(long_df$state_var)
+  long_df$facet_site_state <- paste(long_df$facet_site, long_df$facet_state, sep = " | ")
+
+  facet_mode <- match.arg(facet_mode)
+  facet_col <- switch(
+    facet_mode,
+    site_state = "facet_site_state",
+    state = "facet_state",
+    site = "facet_site"
+  )
+
+  facet_levels <- names(sort(table(long_df[[facet_col]]), decreasing = TRUE))
+  if (is.finite(max_facets) && max_facets > 0 && length(facet_levels) > max_facets) {
+    facet_levels <- facet_levels[seq_len(max_facets)]
+    long_df <- long_df[long_df[[facet_col]] %in% facet_levels, , drop = FALSE]
+  }
+  if (nrow(long_df) == 0) {
+    stop("No rows remained after max_facets filtering.")
+  }
+  facet_levels <- names(sort(table(long_df[[facet_col]]), decreasing = TRUE))
+  long_df[[facet_col]] <- factor(long_df[[facet_col]], levels = facet_levels)
+
+  # Keep point table aligned with plotted site/state combinations.
+  site_state_keep <- unique(data.frame(
+    site_id = as.character(long_df$site_id),
+    state_var = as.character(long_df$state_var),
+    stringsAsFactors = FALSE
+  ))
+  site_state_keep$key <- paste(site_state_keep$site_id, site_state_keep$state_var, sep = "||")
+  points_key <- paste(points_df$site_id, points_df$state_var, sep = "||")
+  points_df <- points_df[points_key %in% site_state_keep$key, , drop = FALSE]
+  if (nrow(points_df) == 0) {
+    stop("No point rows remained after facet filtering.")
+  }
+
+  lookup_tbl <- unique(
+    points_df[
+      ,
+      c("timestep", "block_id", "site_id", "state_idx", "state_var", "n_obs_mapped"),
+      drop = FALSE
+    ]
+  )
+  lookup_tbl$obs_available <- lookup_tbl$n_obs_mapped > 0
+  lookup_tbl <- lookup_tbl[order(lookup_tbl$site_id, lookup_tbl$state_var, lookup_tbl$state_idx), , drop = FALSE]
 
   overall_split <- split(long_df$value, as.character(long_df$source))
   overall_summary <- do.call(
@@ -351,12 +474,40 @@ plot_timestep_state_distributions <- function(outdir,
   ]
   by_state_summary <- by_state_summary[order(by_state_summary$state_var, by_state_summary$source), , drop = FALSE]
 
+  by_site_state_summary <- do.call(
+    rbind,
+    lapply(
+      split(long_df, list(long_df$site_id, long_df$state_var, long_df$source), drop = TRUE),
+      function(d) {
+        sm <- summarize_values(d$value)
+        out <- as.data.frame(as.list(sm), stringsAsFactors = FALSE)
+        out$site_id <- as.character(d$site_id[1])
+        out$state_var <- as.character(d$state_var[1])
+        out$source <- as.character(d$source[1])
+        out
+      }
+    )
+  )
+  by_site_state_summary <- by_site_state_summary[
+    ,
+    c("site_id", "state_var", "source", "n", "mean", "sd", "median", "p05", "p25", "p75", "p95")
+  ]
+  by_site_state_summary <- by_site_state_summary[
+    order(by_site_state_summary$site_id, by_site_state_summary$state_var, by_site_state_summary$source),
+    ,
+    drop = FALSE
+  ]
+
   points_csv <- file.path(output_dir, paste0(prefix, "_obs_forecast_analysis_points.csv"))
+  lookup_csv <- file.path(output_dir, paste0(prefix, "_site_state_lookup.csv"))
   summary_overall_csv <- file.path(output_dir, paste0(prefix, "_summary_overall.csv"))
   summary_state_csv <- file.path(output_dir, paste0(prefix, "_summary_by_state.csv"))
+  summary_site_state_csv <- file.path(output_dir, paste0(prefix, "_summary_by_site_state.csv"))
   utils::write.csv(points_df, points_csv, row.names = FALSE)
+  utils::write.csv(lookup_tbl, lookup_csv, row.names = FALSE)
   utils::write.csv(overall_summary, summary_overall_csv, row.names = FALSE)
   utils::write.csv(by_state_summary, summary_state_csv, row.names = FALSE)
+  utils::write.csv(by_site_state_summary, summary_site_state_csv, row.names = FALSE)
 
   colors <- c(
     Observation = "#1f78b4",
@@ -385,23 +536,31 @@ plot_timestep_state_distributions <- function(outdir,
   overall_png <- file.path(output_dir, paste0(prefix, "_density_overall.png"))
   ggplot2::ggsave(overall_png, p_overall, width = 11, height = 6.5, dpi = 180)
 
-  n_state <- length(state_levels)
-  ncol_facets <- if (n_state <= 4) 2 else if (n_state <= 9) 3 else 4
-  nrow_facets <- max(1, ceiling(n_state / ncol_facets))
+  n_facets <- length(facet_levels)
+  ncol_facets <- if (n_facets <= 4) 2 else if (n_facets <= 9) 3 else 4
+  nrow_facets <- max(1, ceiling(n_facets / ncol_facets))
   facet_height <- max(6, min(30, 2.2 * nrow_facets + 1.5))
 
-  p_by_state <- ggplot2::ggplot(
+  facet_subtitle <- switch(
+    facet_mode,
+    site_state = "Each panel is one site | state variable",
+    state = "Each panel is one state variable (all sites combined)",
+    site = "Each panel is one site (all state variables combined)"
+  )
+  facet_formula <- stats::as.formula(paste0("~", facet_col))
+
+  p_by_facet <- ggplot2::ggplot(
     long_df,
     ggplot2::aes(x = value, y = ggplot2::after_stat(density), color = source, fill = source)
   ) +
     ggplot2::geom_histogram(alpha = 0.28, bins = bins, position = "identity", linewidth = 0.2) +
     ggplot2::geom_density(alpha = 0.08, linewidth = 0.7, adjust = 1.05) +
-    ggplot2::facet_wrap(~state_var, scales = "free_y", ncol = ncol_facets) +
+    ggplot2::facet_wrap(facet_formula, scales = "free_y", ncol = ncol_facets) +
     ggplot2::scale_color_manual(values = colors) +
     ggplot2::scale_fill_manual(values = colors) +
     ggplot2::labs(
-      title = sprintf("Timestep %d: distribution by state variable", timestep),
-      subtitle = "Each panel is one state variable",
+      title = sprintf("Timestep %d: distribution by %s", timestep, facet_mode),
+      subtitle = facet_subtitle,
       x = "Value",
       y = "Density",
       color = NULL,
@@ -413,8 +572,8 @@ plot_timestep_state_distributions <- function(outdir,
       strip.text = ggplot2::element_text(size = 8)
     )
 
-  state_png <- file.path(output_dir, paste0(prefix, "_density_by_state.png"))
-  ggplot2::ggsave(state_png, p_by_state, width = 14, height = facet_height, dpi = 180)
+  facet_png <- file.path(output_dir, paste0(prefix, "_density_by_", facet_mode, ".png"))
+  ggplot2::ggsave(facet_png, p_by_facet, width = 14, height = facet_height, dpi = 180)
 
   p_ecdf <- ggplot2::ggplot(
     long_df,
@@ -434,19 +593,22 @@ plot_timestep_state_distributions <- function(outdir,
   ecdf_png <- file.path(output_dir, paste0(prefix, "_ecdf_overall.png"))
   ggplot2::ggsave(ecdf_png, p_ecdf, width = 11, height = 6.5, dpi = 180)
 
-  plot_files <- c(overall_png, state_png, ecdf_png)
+  plot_files <- c(overall_png, facet_png, ecdf_png)
 
   if (isTRUE(verbose)) {
     message(resolved$selection_note)
     message("Selected timestep: ", timestep)
     message("Loaded file: ", basename(sda_file))
     message("Rows extracted: ", nrow(points_df))
-    message("State variables plotted: ", n_state)
+    message("Unique state variables plotted: ", length(unique(as.character(long_df$state_var))))
+    message("Unique sites plotted: ", length(unique(as.character(long_df$site_id))))
     message("Output directory: ", normalizePath(output_dir, mustWork = FALSE))
     message("Outputs:")
     message("  - ", points_csv)
+    message("  - ", lookup_csv)
     message("  - ", summary_overall_csv)
     message("  - ", summary_state_csv)
+    message("  - ", summary_site_state_csv)
     for (pf in plot_files) {
       message("  - ", pf)
     }
@@ -457,10 +619,18 @@ plot_timestep_state_distributions <- function(outdir,
     source_file = sda_file,
     selection = resolved,
     point_table = points_df,
+    lookup_table = lookup_tbl,
     long_table = long_df,
     summary_overall = overall_summary,
     summary_by_state = by_state_summary,
-    csv_files = c(points = points_csv, overall = summary_overall_csv, by_state = summary_state_csv),
+    summary_by_site_state = by_site_state_summary,
+    csv_files = c(
+      points = points_csv,
+      lookup = lookup_csv,
+      overall = summary_overall_csv,
+      by_state = summary_state_csv,
+      by_site_state = summary_site_state_csv
+    ),
     plot_files = plot_files
   ))
 }
@@ -496,6 +666,7 @@ if (sys.nframe() == 0) {
   timestep <- parse_int(get_arg("timestep", NULL), NULL)
   index <- parse_int(get_arg("index", NULL), NULL)
   max_states <- parse_int(get_arg("max_states", "0"), 0)
+  max_facets <- parse_int(get_arg("max_facets", "0"), 0)
 
   bad_points_csv <- get_arg("bad_points_csv", NULL)
   if (is.null(bad_points_csv)) {
@@ -511,7 +682,10 @@ if (sys.nframe() == 0) {
     output_dir = get_arg("output_dir", file.path(outdir, "timestep_distribution_plots")),
     prefix = get_arg("prefix", NULL),
     bins = parse_int(get_arg("bins", "30"), 30),
+    site_ids = get_arg("site_ids", NULL),
+    facet_mode = get_arg("facet_mode", "site_state"),
     max_states = max_states,
+    max_facets = max_facets,
     verbose = TRUE
   )
 }
@@ -520,6 +694,9 @@ if (sys.nframe() == 0) {
 # Rscript plot_timestep_state_distributions.R \
 #   --outdir=/path/to/output_inter_q \
 #   --timestep=25 \
+#   --facet_mode=site_state \
+#   --site_ids=US-Ha1,US-MMS \
+#   --max_facets=36 \
 #   --output_dir=/path/to/output_inter_q/timestep_distribution_plots
 #
 # Example 2: resolve timestep from bad-point rank/index
