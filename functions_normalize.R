@@ -70,6 +70,100 @@ write.ensemble.configs <- function (defaults, ensemble.samples, settings, model,
   if (is.null(ensemble.samples)) {
     return(list(runs = NULL, ensemble.id = NULL))
   }
+  first_path <- function(paths) {
+    if (is.null(paths)) {
+      return(NULL)
+    }
+    flat <- if (is.list(paths)) {
+      unlist(paths, recursive = TRUE, use.names = FALSE)
+    }
+    else {
+      paths
+    }
+    flat <- as.character(flat)
+    flat <- flat[!is.na(flat) & nzchar(trimws(flat))]
+    if (length(flat) == 0) {
+      return(NULL)
+    }
+    flat[[1]]
+  }
+  normalize_input_samples <- function(samples, settings) {
+    nens <- as.integer(settings$ensemble$size)
+    if (is.na(nens) || nens < 1) {
+      return(samples)
+    }
+    input_tags <- intersect(names(samples), names(settings$run$inputs))
+    for (input_tag in input_tags) {
+      sample_definition <- samples[[input_tag]]
+      sample_paths <- if (is.list(sample_definition) && !is.null(sample_definition[["samples"]])) {
+        sample_definition[["samples"]]
+      }
+      else {
+        sample_definition
+      }
+      if (!is.list(sample_paths)) {
+        sample_paths <- as.list(sample_paths)
+      }
+      sample_paths <- lapply(sample_paths, first_path)
+      sample_paths <- sample_paths[!vapply(sample_paths, is.null, logical(1))]
+      if (length(sample_paths) == 0) {
+        fallback_path <- first_path(settings$run$inputs[[input_tag]]$path)
+        if (is.null(fallback_path)) {
+          PEcAn.logger::logger.error("Input", sQuote(input_tag), 
+                                     "has no sampled path and no default path")
+        }
+        sample_paths <- rep(list(fallback_path), nens)
+        PEcAn.logger::logger.warn("Input", sQuote(input_tag), 
+                                  "did not generate ensemble samples;",
+                                  "using the default path for all members.")
+      }
+      else if (length(sample_paths) < nens) {
+        n_samples <- length(sample_paths)
+        sample_paths <- c(sample_paths, rep(list(sample_paths[[1]]), 
+                                            nens - length(sample_paths)))
+        PEcAn.logger::logger.warn("Input", sQuote(input_tag), "generated", 
+                                  n_samples, "sample path(s) for", 
+                                  nens, "ensemble members. Reusing the first sample for missing members.")
+      }
+      if (!is.list(sample_definition)) {
+        sample_definition <- list()
+      }
+      sample_definition[["samples"]] <- sample_paths
+      samples[[input_tag]] <- sample_definition
+    }
+    samples
+  }
+  get_sample_path <- function(sample_definition, default_paths, member_index, input_tag) {
+    sample_paths <- if (is.list(sample_definition) && !is.null(sample_definition[["samples"]])) {
+      sample_definition[["samples"]]
+    }
+    else {
+      sample_definition
+    }
+    if (!is.null(sample_paths)) {
+      if (!is.list(sample_paths)) {
+        sample_paths <- as.list(sample_paths)
+      }
+      sample_paths <- lapply(sample_paths, first_path)
+    }
+    member_path <- NULL
+    if (!is.null(sample_paths) && length(sample_paths) >= member_index) {
+      member_path <- sample_paths[[member_index]]
+    }
+    if (!is.null(member_path)) {
+      return(member_path)
+    }
+    fallback_path <- first_path(sample_paths)
+    if (is.null(fallback_path)) {
+      fallback_path <- first_path(default_paths)
+    }
+    if (is.null(fallback_path)) {
+      PEcAn.logger::logger.error("Input", sQuote(input_tag), 
+                                 "is missing a valid path for ensemble member", 
+                                 member_index)
+    }
+    fallback_path
+  }
   if (!is.null(settings$database$bety$write)) {
     write.to.db <- as.logical(settings$database$bety$write)
   }
@@ -157,6 +251,7 @@ write.ensemble.configs <- function (defaults, ensemble.samples, settings, model,
       ])
     if (is.null(samples$parameters$samples)) 
       samples$parameters$samples <- ensemble.samples
+    samples <- normalize_input_samples(samples, settings)
     inputs <- names(settings$run$inputs)
     inputs <- inputs[grepl(".id$", inputs)]
     runs <- data.frame()
@@ -192,9 +287,12 @@ write.ensemble.configs <- function (defaults, ensemble.samples, settings, model,
       for (input_i in seq_along(settings$run$inputs)) {
         input_tag <- names(settings$run$inputs)[[input_i]]
         if (!is.null(samples[[input_tag]])) {
-          settings$run$inputs[[input_tag]][["path"]] <- samples[[input_tag]][["samples"]][[i]]
+          input_path <- get_sample_path(samples[[input_tag]], 
+                                        settings$run$inputs[[input_tag]]$path, 
+                                        i, input_tag)
+          settings$run$inputs[[input_tag]][["path"]] <- input_path
           input_info <- paste0(input_info, format(input_tag, 
-                                                  width = 12, justify = "left"), ": ", samples[[input_tag]]$samples[[i]], 
+                                                  width = 12, justify = "left"), ": ", input_path, 
                                "\n")
         }
       }
@@ -225,7 +323,8 @@ write.ensemble.configs <- function (defaults, ensemble.samples, settings, model,
           # print(input$path[1])
         }
         else {
-          settings$run$inputs[[input_tag]]$path <- samples[[input_tag]][["samples"]][[i]]
+          settings$run$inputs[[input_tag]]$path <- get_sample_path(samples[[input_tag]], 
+                                                                   input$path, i, input_tag)
         }
       }
       ####
@@ -311,8 +410,11 @@ write.ensemble.configs <- function (defaults, ensemble.samples, settings, model,
     for (i in seq_len(settings$ensemble$size)) {
       input_list <- list()
       for (input_tag in names(inputs)) {
-        if (!is.null(inputs[[input_tag]]$samples[[i]])) 
-          input_list[[input_tag]] <- list(path = inputs[[input_tag]]$samples[[i]])
+        default_path <- settings$run$inputs[[input_tag]]$path
+        input_path <- get_sample_path(inputs[[input_tag]], default_path, 
+                                      i, input_tag)
+        if (!is.null(input_path)) 
+          input_list[[input_tag]] <- list(path = input_path)
       }
       do.call(my.write_restart, args = list(outdir = settings$host$outdir, 
                                             runid = run.id[[i]], start.time = restart$start.time, 
@@ -969,7 +1071,7 @@ build_X <- function(out.configs, settings, new.params, nens, read_restart_times,
           
         }
         return(X_tmp)
-      })
+      }, .options = furrr::furrr_options(seed = TRUE))
     
   }else{
     reads <-
@@ -995,7 +1097,7 @@ build_X <- function(out.configs, settings, new.params, nens, read_restart_times,
           # print("successful loop")
         }
         return(X_tmp)
-      })
+      }, .options = furrr::furrr_options(seed = TRUE))
   }
   return(reads)
   # print("End of BuildX")
@@ -2912,6 +3014,7 @@ sda.forecast.local <- function (settings, obs.mean, obs.cov, Q = NULL, pre_enkf_
     if (cores < 1) 
       cores <- 1
   }
+  furrr_options_seed <- furrr::furrr_options(seed = TRUE)
   if (!is.null(outdir)) {
     PEcAn.logger::logger.info(paste0("Replacing model output directories with ", 
                                      outdir, "."))
@@ -3032,7 +3135,7 @@ sda.forecast.local <- function (settings, obs.mean, obs.cov, Q = NULL, pre_enkf_
         inputs.split <- inputs
       }
       settings
-    }, .progress = F)
+    }, .progress = F, .options = furrr_options_seed)
   conf.settings <- PEcAn.settings::as.MultiSettings(conf.settings)
   if (is.null(ensemble.samples)) {
     load(file.path(settings$outdir, "samples.Rdata"))
@@ -3081,7 +3184,7 @@ sda.forecast.local <- function (settings, obs.mean, obs.cov, Q = NULL, pre_enkf_
                                                     inputs.split <- inputs
                                                   }
                                                   inputs.split
-                                                })
+                                                }, .options = furrr_options_seed)
       PEcAn.logger::logger.info("Collecting restart info!")
       restart.list <- furrr::future_pmap(list(out.configs, 
                                               conf.settings %>% `class<-`(c("list")), params.list, 
@@ -3098,7 +3201,7 @@ sda.forecast.local <- function (settings, obs.mean, obs.cov, Q = NULL, pre_enkf_
                                                      settings = settings, new.state = new_state_site, 
                                                      new.params = new.params, inputs = inputs, RENAME = TRUE, 
                                                      ensemble.id = settings$ensemble$ensemble.id)
-                                              })
+                                              }, .options = furrr_options_seed)
     }
     else {
       restart.list <- vector("list", length(conf.settings))
@@ -3115,8 +3218,8 @@ sda.forecast.local <- function (settings, obs.mean, obs.cov, Q = NULL, pre_enkf_
                                                write.ensemble.configs(defaults = settings$pfts, 
                                                                       ensemble.samples = ensemble.samples, settings = settings, 
                                                                       model = settings$model$type, write.to.db = settings$database$bety$write, 
-                                                                      restart = restart.arg, samples = inputs, rename = TRUE)
-                                             }) %>% stats::setNames(site.ids)
+                                              restart = restart.arg, samples = inputs, rename = TRUE)
+                                            }, .options = furrr_options_seed) %>% stats::setNames(site.ids)
     ####################End
     # print("finish de-bugging ")
     ensemble.ids <- site.ids %>% furrr::future_map(function(i) {
@@ -3126,14 +3229,14 @@ sda.forecast.local <- function (settings, obs.mean, obs.cov, Q = NULL, pre_enkf_
                                                        j), "-", i))
       }
       return(run.list)
-    }, .progress = F) %>% unlist
+    }, .progress = F, .options = furrr_options_seed) %>% unlist
     runs.tmp <- file.path(rundir, ensemble.ids)
     PEcAn.logger::logger.info("Running models!")
     job.files <- file.path(runs.tmp, "job.sh")
     temp <- job.files %>% furrr::future_map(function(f) {
       cmd <- paste0("cd ", dirname(f), ";./job.sh")
       system(cmd, intern = F, ignore.stdout = T, ignore.stderr = T)
-    }, .progress = F)
+    }, .progress = F, .options = furrr_options_seed)
     PEcAn.logger::logger.info("Reading forecast outputs!")
     
     #### Having the problems (Solved)
@@ -3146,7 +3249,7 @@ sda.forecast.local <- function (settings, obs.mean, obs.cov, Q = NULL, pre_enkf_
     params.list <- reads %>% purrr::map(~.x %>% purrr::map("params"))
     X <- reads %>% furrr::future_map(function(r) {
       r %>% purrr::map_df(~.x[["X"]] %>% t %>% as.data.frame)
-    })
+    }, .options = furrr_options_seed)
     if (control$OutlierDetection) {
       X <- outlier.detector.boxplot(X)
       PEcAn.logger::logger.info("Outlier Detection.")
@@ -3156,7 +3259,7 @@ sda.forecast.local <- function (settings, obs.mean, obs.cov, Q = NULL, pre_enkf_
       temp <- do.call(cbind, X[i])
       colnames(temp) <- paste0(var.names, ".", i)
       return(temp)
-    }) %>% dplyr::bind_cols() %>% `colnames<-`(c(rep(var.names, 
+    }, .options = furrr_options_seed) %>% dplyr::bind_cols() %>% `colnames<-`(c(rep(var.names, 
                                                      length(X)))) %>% `attr<-`("Site", c(rep(site.ids, 
                                                                                              each = length(var.names))))
     # ===== compute scaling once at t == 1 =====
@@ -3352,7 +3455,7 @@ sda.forecast.local <- function (settings, obs.mean, obs.cov, Q = NULL, pre_enkf_
       temp <- outs.tmp %>% furrr::future_map(function(f) {
         temp <- list.files(f, "*.nc", full.names = T)
         unlink(temp)
-      }, .progress = F)
+      }, .progress = F, .options = furrr_options_seed)
     }
     ##### send email to progress
     if (!is.null(control$send_email)) {
