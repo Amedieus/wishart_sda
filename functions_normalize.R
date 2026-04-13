@@ -39,6 +39,134 @@ sda_matchparam <- function(settings, ensemble.samples, site.ids, nens){
   return(new.params)
 }
 
+input.ens.gen.debug <- function(settings, ensemble_size, input, method = "sampling",
+                                parent_ids = NULL, debug = TRUE, debug_dir = NULL,
+                                debug_prefix = "input_ens_debug") {
+  samples <- list(ids = integer(0), samples = list())
+  input_tag <- tolower(input)
+  site_id <- tryCatch(as.character(settings$run$site$id), error = function(e) NA_character_)
+  outdir <- tryCatch(settings$outdir, error = function(e) NULL)
+  debug_events <- c()
+  add_event <- function(...) {
+    msg <- paste(..., collapse = " ")
+    debug_events <<- c(debug_events, msg)
+    if (isTRUE(debug)) {
+      PEcAn.logger::logger.info("[input.ens.gen.debug]", msg)
+    }
+  }
+  persist_debug <- function() {
+    if (!isTRUE(debug) || is.null(outdir) || is.na(site_id)) {
+      return(invisible(NULL))
+    }
+    if (is.null(debug_dir)) {
+      debug_dir <- file.path(outdir, "debug_input_ens")
+    }
+    if (!dir.exists(debug_dir)) {
+      dir.create(debug_dir, recursive = TRUE, showWarnings = FALSE)
+    }
+    ts <- format(Sys.time(), "%Y%m%d-%H%M%S")
+    file_stub <- paste0(debug_prefix, "_site_", site_id, "_", input_tag, "_", ts)
+    report <- list(
+      site_id = site_id,
+      input = input,
+      method = method,
+      ensemble_size = ensemble_size,
+      events = debug_events,
+      ids = samples$ids,
+      sample_n = length(samples$samples)
+    )
+    saveRDS(report, file.path(debug_dir, paste0(file_stub, ".rds")))
+  }
+  on.exit(persist_debug(), add = TRUE)
+  if (is.null(method)) {
+    add_event("method is NULL; returning NULL")
+    return(NULL)
+  }
+  if (input_tag == "parameters") {
+    add_event("input is parameters; returning NULL (handled elsewhere)")
+    return(NULL)
+  }
+  if (missing(ensemble_size) || is.null(ensemble_size) || is.na(ensemble_size)) {
+    ensemble_size <- as.integer(settings$ensemble$size)
+    add_event("ensemble_size missing, fallback to settings value:", ensemble_size)
+  }
+  ensemble_size <- as.integer(ensemble_size)
+  if (is.na(ensemble_size) || ensemble_size < 1) {
+    stop("input.ens.gen.debug received invalid ensemble_size for input ", input, call. = FALSE)
+  }
+  input_path <- settings$run$inputs[[input_tag]]$path
+  if (is.null(input_path)) {
+    PEcAn.logger::logger.error("No paths found for input", sQuote(input), "in settings$run$inputs")
+  }
+  if (!is.list(input_path)) {
+    input_path <- as.list(input_path)
+  }
+  input_path <- input_path[!vapply(input_path, is.null, logical(1))]
+  n_input_paths <- length(input_path)
+  add_event("resolved input_path length:", n_input_paths)
+  if (n_input_paths < 1) {
+    stop("No available input paths for input ", input, " at site ", site_id, call. = FALSE)
+  }
+  method_norm <- tolower(as.character(method))
+  if (!is.null(parent_ids)) {
+    parent_vec <- parent_ids$ids
+    if (is.null(parent_vec)) {
+      parent_vec <- parent_ids
+    }
+    parent_vec <- as.integer(parent_vec)
+    if (length(parent_vec) < ensemble_size) {
+      add_event("parent_ids shorter than ensemble_size:", length(parent_vec), "<", ensemble_size, "- recycling")
+      parent_vec <- rep_len(parent_vec, ensemble_size)
+    }
+    if (length(parent_vec) > ensemble_size) {
+      add_event("parent_ids longer than ensemble_size:", length(parent_vec), ">", ensemble_size, "- truncating")
+      parent_vec <- parent_vec[seq_len(ensemble_size)]
+    }
+    bad_idx <- which(is.na(parent_vec) | parent_vec < 1L | parent_vec > n_input_paths)
+    if (length(bad_idx) > 0) {
+      add_event("found out-of-range parent ids:", length(bad_idx), "- resampling those indices")
+      parent_vec[bad_idx] <- sample(seq_len(n_input_paths), length(bad_idx), replace = TRUE)
+    }
+    samples$ids <- parent_vec
+  }
+  else if (method_norm == "sampling") {
+    samples$ids <- sample(seq_len(n_input_paths), ensemble_size, replace = TRUE)
+    add_event("sampling mode generated ids length:", length(samples$ids))
+  }
+  else if (method_norm == "looping") {
+    samples$ids <- rep_len(seq_len(n_input_paths), length.out = ensemble_size)
+    add_event("looping mode generated ids length:", length(samples$ids))
+  }
+  else {
+    add_event("unknown method:", method, "- fallback to looping")
+    samples$ids <- rep_len(seq_len(n_input_paths), length.out = ensemble_size)
+  }
+  if (length(samples$ids) != ensemble_size) {
+    add_event("ids length mismatch:", length(samples$ids), "vs ensemble_size", ensemble_size, "- fixing by rep_len")
+    samples$ids <- rep_len(samples$ids, ensemble_size)
+  }
+  bad_idx_final <- which(is.na(samples$ids) | samples$ids < 1L | samples$ids > n_input_paths)
+  if (length(bad_idx_final) > 0) {
+    add_event("final ids still out of range:", length(bad_idx_final), "- resampling")
+    samples$ids[bad_idx_final] <- sample(seq_len(n_input_paths), length(bad_idx_final), replace = TRUE)
+  }
+  samples$samples <- lapply(samples$ids, function(idx) input_path[[idx]])
+  if (length(samples$samples) != ensemble_size) {
+    add_event("samples length mismatch after build:", length(samples$samples), "vs", ensemble_size, "- fixing by rep_len")
+    samples$samples <- rep_len(samples$samples, ensemble_size)
+  }
+  flat_preview <- vapply(samples$samples[seq_len(min(3, length(samples$samples)))],
+                         function(x) {
+                           v <- unlist(x, recursive = TRUE, use.names = FALSE)
+                           if (length(v) == 0) {
+                             return(NA_character_)
+                           }
+                           as.character(v[[1]])
+                         }, character(1))
+  add_event("sample preview:", paste(flat_preview, collapse = " | "))
+  samples
+}
+
 
 
 
@@ -3201,14 +3329,29 @@ sda.forecast.local <- function (settings, obs.mean, obs.cov, Q = NULL, pre_enkf_
   samp.ordered <- samp[c(order, names(samp)[!(names(samp) %in% 
                                                 order)])]
   inputs <- vector("list", length(conf.settings))
+  use_input_ens_debug <- isTRUE(control$debug.input.ens.gen)
+  input_ens_debug_dir <- control$debug.input.ens.dir
+  if (!isTRUE(use_input_ens_debug)) {
+    input_ens_debug_dir <- NULL
+  }
   for (s in seq_along(conf.settings)) {
     if (is.null(inputs[[s]])) {
       inputs[[s]] <- list()
     }
     for (i in seq_along(samp.ordered)) {
-      inputs[[s]][[names(samp.ordered)[i]]] <- PEcAn.uncertainty::input.ens.gen(settings = conf.settings[[s]], 
-                                                                                input = names(samp.ordered)[i], method = samp.ordered[[i]]$method, 
-                                                                                parent_ids = NULL)
+      input_name <- names(samp.ordered)[i]
+      input_method <- samp.ordered[[i]]$method
+      if (use_input_ens_debug) {
+        inputs[[s]][[input_name]] <- input.ens.gen.debug(settings = conf.settings[[s]], 
+                                                         ensemble_size = nens, input = input_name, 
+                                                         method = input_method, parent_ids = NULL, 
+                                                         debug_dir = input_ens_debug_dir)
+      }
+      else {
+        inputs[[s]][[input_name]] <- PEcAn.uncertainty::input.ens.gen(settings = conf.settings[[s]], 
+                                                                       ensemble_size = nens, input = input_name, 
+                                                                       method = input_method, parent_ids = NULL)
+      }
     }
   }
   for (t in 1:nt) {
