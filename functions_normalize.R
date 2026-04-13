@@ -3328,29 +3328,109 @@ sda.forecast.local <- function (settings, obs.mean, obs.cov, Q = NULL, pre_enkf_
                                                             tr)) %>% unlist()]
   samp.ordered <- samp[c(order, names(samp)[!(names(samp) %in% 
                                                 order)])]
-  inputs <- vector("list", length(conf.settings))
   use_input_ens_debug <- isTRUE(control$debug.input.ens.gen)
   input_ens_debug_dir <- control$debug.input.ens.dir
   if (!isTRUE(use_input_ens_debug)) {
     input_ens_debug_dir <- NULL
   }
+  sampled_input_tags <- setdiff(names(samp.ordered), "parameters")
+  input_design <- NULL
+  design_site <- NA_character_
   for (s in seq_along(conf.settings)) {
-    if (is.null(inputs[[s]])) {
-      inputs[[s]] <- list()
+    site_input_names <- names(conf.settings[[s]]$run$inputs)
+    if (!all(sampled_input_tags %in% site_input_names)) {
+      next
     }
-    for (i in seq_along(samp.ordered)) {
-      input_name <- names(samp.ordered)[i]
-      input_method <- samp.ordered[[i]]$method
-      if (use_input_ens_debug) {
-        inputs[[s]][[input_name]] <- input.ens.gen.debug(settings = conf.settings[[s]], 
-                                                         ensemble_size = nens, input = input_name, 
-                                                         method = input_method, parent_ids = NULL, 
-                                                         debug_dir = input_ens_debug_dir)
+    design_candidate <- PEcAn.uncertainty::generate_joint_ensemble_design(settings = conf.settings[[s]], 
+                                                                           ensemble_size = nens)
+    input_design <- if (is.data.frame(design_candidate)) {
+      design_candidate
+    }
+    else if (is.list(design_candidate) && !is.null(design_candidate$X)) {
+      as.data.frame(design_candidate$X)
+    }
+    else if (is.list(design_candidate) && length(design_candidate) > 0 && is.data.frame(design_candidate[[1]])) {
+      as.data.frame(design_candidate[[1]])
+    }
+    else {
+      NULL
+    }
+    if (!is.null(input_design)) {
+      design_site <- as.character(conf.settings[[s]]$run$site$id)
+      break
+    }
+  }
+  if (is.null(input_design)) {
+    PEcAn.logger::logger.severe("Failed to generate joint ensemble design: no site with all sampled inputs or invalid output from generate_joint_ensemble_design.")
+  }
+  if (nrow(input_design) < nens) {
+    PEcAn.logger::logger.severe("Joint ensemble design has fewer rows than ensemble size. design rows = ", 
+                                nrow(input_design), ", ensemble size = ", nens)
+  }
+  input_design <- input_design[seq_len(nens), , drop = FALSE]
+  missing_design_tags <- setdiff(sampled_input_tags, colnames(input_design))
+  if (length(missing_design_tags) > 0) {
+    PEcAn.logger::logger.severe("Joint ensemble design is missing sampled input column(s): ", 
+                                paste(missing_design_tags, collapse = ", "))
+  }
+  for (input_tag in intersect(colnames(input_design), sampled_input_tags)) {
+    input_design[[input_tag]] <- as.integer(input_design[[input_tag]])
+  }
+  PEcAn.logger::logger.info("Generated joint ensemble design from site ", design_site, 
+                            " with ", nrow(input_design), " rows.")
+  if (isTRUE(use_input_ens_debug)) {
+    if (is.null(input_ens_debug_dir)) {
+      input_ens_debug_dir <- file.path(settings$outdir, "debug_input_ens")
+    }
+    if (!dir.exists(input_ens_debug_dir)) {
+      dir.create(input_ens_debug_dir, recursive = TRUE, showWarnings = FALSE)
+    }
+    saveRDS(list(design_site = design_site, sampled_input_tags = sampled_input_tags, 
+                 input_design = input_design), file.path(input_ens_debug_dir, 
+                                                        paste0("joint_input_design_", format(Sys.time(), "%Y%m%d-%H%M%S"), ".rds")))
+  }
+  inputs <- vector("list", length(conf.settings))
+  for (s in seq_along(conf.settings)) {
+    inputs[[s]] <- list()
+    for (input_name in sampled_input_tags) {
+      if (!input_name %in% names(conf.settings[[s]]$run$inputs)) {
+        next
       }
-      else {
-        inputs[[s]][[input_name]] <- PEcAn.uncertainty::input.ens.gen(settings = conf.settings[[s]], 
-                                                                       ensemble_size = nens, input = input_name, 
-                                                                       method = input_method, parent_ids = NULL)
+      input_paths <- conf.settings[[s]]$run$inputs[[input_name]]$path
+      if (!is.list(input_paths)) {
+        input_paths <- as.list(input_paths)
+      }
+      if (is.null(input_design[[input_name]])) {
+        next
+      }
+      input_indices <- as.integer(input_design[[input_name]])
+      max_idx <- length(input_paths)
+      if (max_idx < 1) {
+        PEcAn.logger::logger.error("Input", sQuote(input_name), "has no available paths at site", 
+                                   sQuote(conf.settings[[s]]$run$site$id), "when applying joint design.")
+        next
+      }
+      bad_idx <- which(is.na(input_indices) | input_indices < 1L | input_indices > max_idx)
+      if (length(bad_idx) > 0) {
+        PEcAn.logger::logger.warn("Joint design has", length(bad_idx), "invalid index/indices for input", 
+                                  sQuote(input_name), "at site", sQuote(conf.settings[[s]]$run$site$id), 
+                                  "- resampling to valid range.")
+        input_indices[bad_idx] <- sample(seq_len(max_idx), length(bad_idx), replace = TRUE)
+      }
+      sampled_paths <- lapply(input_indices, function(idx) input_paths[[idx]])
+      inputs[[s]][[input_name]] <- list(ids = input_indices, 
+                                        samples = sampled_paths)
+      if (isTRUE(use_input_ens_debug)) {
+        input_method <- conf.settings[[s]]$ensemble$samplingspace[[input_name]]$method
+        if (is.null(input_method)) {
+          input_method <- "sampling"
+        }
+        input.ens.gen.debug(settings = conf.settings[[s]], 
+                            ensemble_size = nens, input = input_name, 
+                            method = input_method, 
+                            parent_ids = list(ids = input_indices), 
+                            debug = TRUE, debug_dir = input_ens_debug_dir, 
+                            debug_prefix = "joint_design_applied")
       }
     }
   }
