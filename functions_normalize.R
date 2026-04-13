@@ -3015,6 +3015,58 @@ sda.forecast.local <- function (settings, obs.mean, obs.cov, Q = NULL, pre_enkf_
       cores <- 1
   }
   furrr_options_seed <- furrr::furrr_options(seed = TRUE)
+  first_path <- function(paths) {
+    if (is.null(paths)) {
+      return(NULL)
+    }
+    flat <- if (is.list(paths)) {
+      unlist(paths, recursive = TRUE, use.names = FALSE)
+    }
+    else {
+      paths
+    }
+    flat <- as.character(flat)
+    flat <- flat[!is.na(flat) & nzchar(trimws(flat))]
+    if (length(flat) == 0) {
+      return(NULL)
+    }
+    flat[[1]]
+  }
+  get_input_sample_path <- function(input_definition, default_paths, member_index, input_tag, 
+                                    site_id = NULL) {
+    sample_paths <- if (is.list(input_definition) && !is.null(input_definition[["samples"]])) {
+      input_definition[["samples"]]
+    }
+    else {
+      input_definition
+    }
+    if (!is.list(sample_paths)) {
+      sample_paths <- as.list(sample_paths)
+    }
+    sample_paths <- lapply(sample_paths, first_path)
+    member_path <- if (length(sample_paths) >= member_index) {
+      sample_paths[[member_index]]
+    }
+    else {
+      NULL
+    }
+    if (!is.null(member_path)) {
+      return(member_path)
+    }
+    fallback_path <- first_path(sample_paths)
+    if (is.null(fallback_path)) {
+      fallback_path <- first_path(default_paths)
+    }
+    if (is.null(fallback_path)) {
+      stop(paste0("Missing input path for input tag ", input_tag, 
+                  ", site ", site_id, ", ensemble member ", member_index, "."), 
+           call. = FALSE)
+    }
+    PEcAn.logger::logger.warn("Input", sQuote(input_tag), "for site", 
+                              sQuote(site_id), "is missing sampled path for ensemble member", 
+                              member_index, "- reusing fallback path.")
+    fallback_path
+  }
   if (!is.null(outdir)) {
     PEcAn.logger::logger.info(paste0("Replacing model output directories with ", 
                                      outdir, "."))
@@ -3172,13 +3224,22 @@ sda.forecast.local <- function (settings, obs.mean, obs.cov, Q = NULL, pre_enkf_
                                                   library(paste0("PEcAn.", model), character.only = TRUE)
                                                   inputs.split <- inputs
                                                   if (!no_split) {
+                                                    met.default.path <- settings$run$inputs$met$path
+                                                    met.samples.next <- vector("list", nens)
                                                     for (i in seq_len(nens)) {
-                                                      inputs.split$met$samples[i] <- do.call(my.split_inputs, 
-                                                                                             args = list(settings = settings, start.time = (lubridate::ymd_hms(obs.times[t - 
-                                                                                                                                                                           1], truncated = 3) + lubridate::second(lubridate::hms("00:00:01"))), 
-                                                                                                         stop.time = lubridate::ymd_hms(obs.times[t], 
-                                                                                                                                        truncated = 3), inputs = inputs$met$samples[[i]]))
+                                                      met.input.path <- get_input_sample_path(inputs$met, 
+                                                                                              met.default.path, i, 
+                                                                                              "met", settings$run$site$id)
+                                                      met.samples.next[[i]] <- do.call(my.split_inputs, 
+                                                                                       args = list(settings = settings, start.time = (lubridate::ymd_hms(obs.times[t - 
+                                                                                                                                                                                     1], truncated = 3) + lubridate::second(lubridate::hms("00:00:01"))), 
+                                                                                                   stop.time = lubridate::ymd_hms(obs.times[t], 
+                                                                                                                                  truncated = 3), inputs = met.input.path))
                                                     }
+                                                    if (is.null(inputs.split$met) || !is.list(inputs.split$met)) {
+                                                      inputs.split$met <- list()
+                                                    }
+                                                    inputs.split$met$samples <- met.samples.next
                                                   }
                                                   else {
                                                     inputs.split <- inputs
