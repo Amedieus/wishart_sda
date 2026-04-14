@@ -492,11 +492,14 @@ if (sys.nframe() == 0) {
     verbose = TRUE
   )
 }
+res <- extract_bad_assimilation_points(
+  outdir = "/projectnb/dietzelab/guYANG/pecan/runners/wishart_sda/output_inter_q_3"
+)
 
 # Example:
 # Rscript plot_bad_assimilation_points.R \
-#   --outdir=/path/to/output_inter_q \
-#   --output_dir=/path/to/output_inter_q/bad_assimilation_diagnostics \
+#   --outdir=/projectnb/dietzelab/guYANG/pecan/runners/wishart_sda/output_inter_q_3 \
+#   --output_dir=/projectnb/dietzelab/guYANG/pecan/runners/wishart_sda/output_inter_q_3/bad_assimilation_diagnostics \
 #   --n_bad=100 \
 #   --rhat_threshold=1.1 \
 #   --ess_threshold=200

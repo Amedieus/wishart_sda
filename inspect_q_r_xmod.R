@@ -1136,18 +1136,10 @@ extract_block_mcmc_param_diag <- function(outdir,
 
 # ------------------------------ Usage ---------------------------------
 # source("inspect_q_r_xmod.R")
-<<<<<<< HEAD
-out <- extract_q_r_xmod(
-  outdir = "/projectnb/dietzelab/guYANG/pecan/runners/wishart_sda/output_inter_q_4",
-  output_dir = "/projectnb/dietzelab/guYANG/pecan/runners/wishart_sda/output_inter_q_4/q_r_xmod_tables"
-)
-=======
 # out <- extract_q_r_xmod(
-#   outdir = "/projectnb/dietzelab/guYANG/pecan/runners/wishart_sda/output_inter_q",
-#   output_dir = "/projectnb/dietzelab/guYANG/pecan/runners/wishart_sda/output_inter_q/q_r_xmod_tables"
+#   outdir = "/projectnb/dietzelab/guYANG/pecan/runners/wishart_sda/output_inter_q_4",
+#   output_dir = "/projectnb/dietzelab/guYANG/pecan/runners/wishart_sda/output_inter_q_4/q_r_xmod_tables"
 # )
->>>>>>> 84acecdb687c86db3881ee12f0bad7158603c1df
-#
 # View per-timestep/site values:
 # head(out$q_diag)
 # head(out$r_diag)

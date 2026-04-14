@@ -2879,16 +2879,18 @@ update_q <- function (block.list.all, t, nt, aqq.Init = NULL, bqq.Init = NULL, M
         if (block.list[[i]]$constant$q.type == 3) {
           #initialize aqq and bqq for nt
           if (!is.null(aqq.Init) && !is.null(bqq.Init)) {
+            # q type = 3, set informative prior to see
+            block.list[[i]]$aqq <- array(aqq.Init, dim = c(nvar, nt + 1))
+            block.list[[i]]$bqq <- array(bqq.Init, dim = c(nvar, nt + 1))
+            # q type = 3, set formative prior
             a_vec <- c(4, 2, 2, 3, 2, 4)
             b_vec <- c(40, 2, 1, 6, 1, 20)
-            
             block.list[[i]]$aqq <- matrix(
               rep(a_vec, nt + 1),
               nrow = nvar,
               ncol = nt + 1,
               byrow = FALSE
             )
-            
             block.list[[i]]$bqq <- matrix(
               rep(b_vec, nt + 1),
               nrow = nvar,
@@ -3718,8 +3720,8 @@ sda.forecast.local <- function (settings, obs.mean, obs.cov, Q = NULL, pre_enkf_
     ### Calculate the ensemble weight
     # ens_weights[[obs.t]] <- PEcAnAssimSequential::sda_weights_site(FORECAST, 
     #                                                                ANALYSIS, 1, nens)
-    ### Pure Forecasting, weight is averaged
-    ens_weights[[obs.t]] <- matrix(1/nens, nrow = nens, ncol = ncol(ANALYSIS[[obs.t]]))
+    ### Weighted ensembles
+    ens_weights[[obs.t]] <- PEcAnAssimSequential::sda_weights_site(FORECAST, ANALYSIS, 1, nens)
     ##### Save and output
     sda.outputs <- list(
       obs.mean = obs.mean[[t]],
