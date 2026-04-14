@@ -1939,10 +1939,42 @@ analysis_sda_block <- function (settings, block.list.all, X, obs.mean, obs.cov,
     }
     
     block.list.all[[t]] <- purrr::map(block.list.all[[t]], function(l) {
-      if (is.null(l$constant$q.type) || l$constant$q.type != 4) {
+      if (is.null(l$constant$q.type) || is.null(l$update$q_post_mean)) {
         return(l)
       }
-      if (is.null(l$update$q_post_mean)) {
+      if (l$constant$q.type == 3) {
+        if (is.null(l$aqq) || is.null(l$bqq) || !is.matrix(l$aqq) || !is.matrix(l$bqq)) {
+          return(l)
+        }
+        if (ncol(l$aqq) < (t + 1) || ncol(l$bqq) < (t + 1)) {
+          return(l)
+        }
+        h_idx <- as.integer(l$constant$H)
+        if (length(h_idx) == 0 || any(!is.finite(h_idx)) ||
+            any(h_idx < 1) || any(h_idx > nrow(l$aqq))) {
+          return(l)
+        }
+        q_mean <- as.numeric(l$update$q_post_mean)
+        q_sd <- suppressWarnings(as.numeric(l$update$q_post_sd))
+        if (length(q_mean) != length(h_idx) || length(q_sd) != length(h_idx)) {
+          return(l)
+        }
+        q_var <- q_sd^2
+        valid <- is.finite(q_mean) & is.finite(q_var) & (q_mean > 0) & (q_var > 0)
+        if (!any(valid)) {
+          return(l)
+        }
+        aq_next <- l$aqq[, t]
+        bq_next <- l$bqq[, t]
+        aq_est <- (q_mean[valid]^2) / q_var[valid]
+        bq_est <- q_mean[valid] / q_var[valid]
+        aq_next[h_idx[valid]] <- aq_est
+        bq_next[h_idx[valid]] <- bq_est
+        l$aqq[, t + 1] <- aq_next
+        l$bqq[, t + 1] <- bq_next
+        return(l)
+      }
+      if (l$constant$q.type != 4) {
         return(l)
       }
       if (is.null(l$aqq) || length(dim(l$aqq)) != 3) {
@@ -1951,14 +1983,12 @@ analysis_sda_block <- function (settings, block.list.all, X, obs.mean, obs.cov,
       if (is.null(l$bqq) || length(l$bqq) < (t + 1)) {
         return(l)
       }
-      
       h_idx <- as.integer(l$constant$H)
       nvar <- nrow(l$aqq[, , t, drop = FALSE][, , 1])
       if (length(h_idx) == 0 || any(!is.finite(h_idx)) ||
           any(h_idx < 1) || any(h_idx > nvar)) {
         return(l)
       }
-      
       q_post <- l$update$q_post_mean
       if (is.null(dim(q_post))) {
         q_post <- as.numeric(q_post)
@@ -1977,31 +2007,26 @@ analysis_sda_block <- function (settings, block.list.all, X, obs.mean, obs.cov,
       if (is.null(q_post)) {
         return(l)
       }
-      
       df_curr <- suppressWarnings(as.numeric(l$bqq[t]))
       if (!is.finite(df_curr) || df_curr <= 0) {
         df_curr <- max(length(h_idx) + 2, 1)
       }
-      
       sigma_curr_full <- l$aqq[, , t]
       sigma_curr_obs <- GrabFillMatrix(sigma_curr_full, h_idx)
       q_prior_obs_mean <- make_spd(sigma_curr_obs * df_curr)
       if (is.null(q_prior_obs_mean)) {
         return(l)
       }
-      
       q_target_obs_mean <- make_spd((1 - q_next_lambda) * q_prior_obs_mean + q_next_lambda * q_post)
       if (is.null(q_target_obs_mean)) {
         return(l)
       }
-      
       # Keep df conservative by default (matches legacy stronger prior style).
       df_next <- max(length(h_idx) + q_df_min_offset,
                      ceiling(q_df_strength_factor * length(h_idx) + q_df_min_offset))
       if (is.finite(q_df_next_override) && q_df_next_override > (length(h_idx) - 1)) {
         df_next <- q_df_next_override
       }
-      
       sigma_next_obs <- make_spd(q_target_obs_mean / df_next)
       if (is.null(sigma_next_obs)) {
         return(l)
@@ -2012,7 +2037,6 @@ analysis_sda_block <- function (settings, block.list.all, X, obs.mean, obs.cov,
       if (is.null(sigma_next_full)) {
         return(l)
       }
-      
       l$aqq[, , t + 1] <- sigma_next_full
       l$bqq[t + 1] <- df_next
       l
@@ -2801,6 +2825,16 @@ MCMC_block_function <- function(block) {
     q_type = block$constant$q.type,
     yn = block$constant$YN
   )
+  q_post_sd <- NA_real_
+  if (isTRUE(block$constant$q.type == 3)) {
+    q_idx <- grep("^q\\[", colnames(dat_mat))
+    if (length(q_idx) > 0) {
+      q_sd_vec <- apply(dat_mat[, q_idx, drop = FALSE], 2, stats::sd)
+      if (length(q_sd_vec) == block$constant$YN) {
+        q_post_sd <- q_sd_vec
+      }
+    }
+  }
   
   ## ---- 10. Extract posterior for X and X.mod ----
   iX      <- grep("^X\\[", colnames(dat_mat))
@@ -2839,6 +2873,7 @@ MCMC_block_function <- function(block) {
     mufa = mufa,
     pfa = pfa,
     q_post_mean = q_post_mean,
+    q_post_sd = q_post_sd,
     aq = block$data$aq,
     bq = block$data$bq
   )
