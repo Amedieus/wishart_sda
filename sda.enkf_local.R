@@ -18,6 +18,7 @@
 #' `keepNC` decide if we want to keep the NetCDF files inside the out directory;
 #' `forceRun` decide if we want to proceed the Bayesian MCMC sampling without observations;
 #' `MCMC.args` include lists for controling the MCMC sampling process (iteration, nchains, burnin, and nthin.).
+#' `legacy_q_update` if TRUE uses legacy aq/bq MCMC moment updates; if FALSE uses the guarded/new update.
 #' `merge_nc` determine if we want to merge all netCDF files across sites and ensembles.
 #' If it's set as `TRUE`, we will then combine all netCDF files into the `merged_nc` folder within the `outdir`.
 #' @param debias List: R list containing the covariance directory and the start year.
@@ -40,6 +41,7 @@ sda.enkf_local <- function(settings,
                                         keepNC = TRUE,
                                         forceRun = TRUE,
                                         MCMC.args = NULL,
+                                        legacy_q_update = FALSE,
                                         merge_nc = TRUE),
                            debias = list(cov.dir = NULL, start.year = NULL)) {
   # grab cores from settings.
@@ -414,6 +416,7 @@ sda.enkf_local <- function(settings,
       #running analysis function.
       # forbid submitting jobs to remote.
       settings$state.data.assimilation$batch.settings$analysis <- NULL
+      settings$state.data.assimilation$legacy_q_update <- isTRUE(control$legacy_q_update)
       enkf.params[[obs.t]] <- PEcAnAssimSequential:::analysis_sda_block(settings, block.list.all, X, obs.mean, obs.cov, t, nt, MCMC.args, pre_enkf_params)
       enkf.params[[obs.t]] <- c(enkf.params[[obs.t]], RestartList = list(restart.list %>% stats::setNames(site.ids)))
       block.list.all <- enkf.params[[obs.t]]$block.list.all
