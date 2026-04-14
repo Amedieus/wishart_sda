@@ -2379,8 +2379,8 @@ MCMC_block_function <- function(block) {
     pa  = pa,
     mufa = mufa,
     pfa = pfa,
-    aq = NA,
-    bq = NA
+    aq = block$data$aq,
+    bq = block$data$bq
   )
   
   ## 保存诊断对象
