@@ -985,13 +985,161 @@ extract_q_r_xmod <- function(outdir,
   results
 }
 
+extract_block_mcmc_param_diag <- function(outdir,
+                                          file_id = NA_integer_,
+                                          output_csv = NULL,
+                                          write_csv = FALSE,
+                                          verbose = TRUE) {
+  `%||%` <- function(x, y) if (is.null(x)) y else x
+
+  parse_timestep <- function(path) {
+    as.integer(sub("^sda\\.output([0-9]+)\\.Rdata$", "\\1", basename(path)))
+  }
+
+  infer_year <- function(sda_outputs) {
+    restart <- sda_outputs$restart.list
+    if (!is.null(restart) && length(restart) > 0) {
+      for (el in restart) {
+        if (!is.list(el)) next
+        cand <- el$stop.time %||% el$stop_time
+        d <- tryCatch(as.Date(cand), error = function(e) as.Date(NA))
+        if (!is.na(d)) return(as.integer(format(d, "%Y")))
+      }
+    }
+    as.integer(NA)
+  }
+
+  parse_param_indices <- function(par_name) {
+    inside <- sub("^[^\\[]*\\[", "", par_name)
+    inside <- sub("\\]$", "", inside)
+    nums <- regmatches(inside, gregexpr("[0-9]+", inside))[[1]]
+    as.integer(nums)
+  }
+
+  sda_files <- list.files(outdir, pattern = "^sda\\.output[0-9]+\\.Rdata$", full.names = TRUE)
+  if (length(sda_files) == 0) {
+    stop("No files matched '^sda.output[0-9]+.Rdata$' in outdir.")
+  }
+  sda_files <- sda_files[order(parse_timestep(sda_files))]
+
+  rows <- list()
+  idx <- 1L
+  for (f in sda_files) {
+    t_idx <- parse_timestep(f)
+    env <- new.env(parent = emptyenv())
+    load(f, envir = env)
+    if (!exists("sda.outputs", envir = env, inherits = FALSE)) next
+
+    sda_outputs <- get("sda.outputs", envir = env)
+    enkf <- sda_outputs$enkf.params
+    block_all <- enkf$block.list.all
+    if (is.null(block_all) || length(block_all) < t_idx || is.null(block_all[[t_idx]])) next
+
+    year_value <- infer_year(sda_outputs)
+    block_list <- block_all[[t_idx]]
+
+    for (b in seq_along(block_list)) {
+      block <- block_list[[b]]
+      by_param <- block$diag$by_param
+      if (is.null(by_param) || nrow(by_param) == 0) next
+      by_param <- as.data.frame(by_param, stringsAsFactors = FALSE)
+
+      if (!("par_name" %in% names(by_param))) next
+      if (!("rhat" %in% names(by_param))) by_param$rhat <- NA_real_
+      if (!("ess" %in% names(by_param))) by_param$ess <- NA_real_
+      if (!("param_type" %in% names(by_param))) by_param$param_type <- sub("\\[.*$", "", by_param$par_name)
+      if (!("state_var" %in% names(by_param))) by_param$state_var <- NA_character_
+
+      state_names <- names(block$data$muf %||% numeric())
+      if (is.null(state_names)) state_names <- character(0)
+      h_idx <- as.integer(block$constant$H %||% integer(0))
+      used_lookup <- rep(FALSE, length(state_names))
+      valid_h <- h_idx[is.finite(h_idx) & h_idx > 0 & h_idx <= length(state_names)]
+      if (length(valid_h) > 0) used_lookup[unique(valid_h)] <- TRUE
+
+      out <- by_param
+      out$file_id <- as.integer(file_id)
+      out$year <- year_value
+      out$block_id <- b
+      out$site_id <- as.integer(if (length(block$site.ids %||% integer(0)) > 0) block$site.ids[1] else NA_integer_)
+      out$state_index <- NA_integer_
+      out$used_in_H <- NA
+
+      ix <- grepl("^X(\\.mod)?\\[[0-9]+\\]$", out$par_name)
+      if (any(ix)) {
+        k <- vapply(out$par_name[ix], function(nm) parse_param_indices(nm)[1], integer(1))
+        out$state_index[ix] <- k
+
+        miss_var <- is.na(out$state_var[ix]) | out$state_var[ix] == ""
+        if (any(miss_var)) {
+          fill <- rep(NA_character_, length(k))
+          ok <- k > 0 & k <= length(state_names)
+          fill[ok] <- state_names[k[ok]]
+          out$state_var[ix][miss_var] <- fill[miss_var]
+        }
+
+        used <- rep(NA, length(k))
+        ok_h <- k > 0 & k <= length(used_lookup)
+        used[ok_h] <- used_lookup[k[ok_h]]
+        out$used_in_H[ix] <- used
+      }
+
+      iq <- grepl("^q\\[", out$par_name)
+      if (any(iq)) {
+        out$state_index[iq] <- NA_integer_
+        out$state_var[iq] <- NA_character_
+        out$used_in_H[iq] <- TRUE
+      }
+
+      out$used_in_H <- as.logical(out$used_in_H)
+
+      out <- out[, c(
+        "par_name", "rhat", "ess", "param_type", "file_id", "year",
+        "block_id", "site_id", "state_index", "state_var", "used_in_H"
+      ), drop = FALSE]
+
+      rows[[idx]] <- out
+      idx <- idx + 1L
+    }
+  }
+
+  result <- if (length(rows) == 0) {
+    data.frame(
+      par_name = character(0),
+      rhat = numeric(0),
+      ess = numeric(0),
+      param_type = character(0),
+      file_id = integer(0),
+      year = integer(0),
+      block_id = integer(0),
+      site_id = integer(0),
+      state_index = integer(0),
+      state_var = character(0),
+      used_in_H = logical(0),
+      stringsAsFactors = FALSE
+    )
+  } else {
+    out <- do.call(rbind, rows)
+    rownames(out) <- NULL
+    out
+  }
+
+  if (isTRUE(write_csv)) {
+    if (is.null(output_csv)) output_csv <- file.path(outdir, "mcmc_param_diag_long.csv")
+    utils::write.csv(result, output_csv, row.names = FALSE)
+    if (verbose) message("Saved: ", normalizePath(output_csv, mustWork = FALSE))
+  }
+  if (verbose) message("Rows: ", nrow(result))
+  result
+}
+
 
 # ------------------------------ Usage ---------------------------------
 # source("inspect_q_r_xmod.R")
-out <- extract_q_r_xmod(
-  outdir = "/projectnb/dietzelab/guYANG/pecan/runners/wishart_sda/output_inter_q",
-  output_dir = "/projectnb/dietzelab/guYANG/pecan/runners/wishart_sda/output_inter_q/q_r_xmod_tables"
-)
+# out <- extract_q_r_xmod(
+#   outdir = "/projectnb/dietzelab/guYANG/pecan/runners/wishart_sda/output_inter_q",
+#   output_dir = "/projectnb/dietzelab/guYANG/pecan/runners/wishart_sda/output_inter_q/q_r_xmod_tables"
+# )
 #
 # View per-timestep/site values:
 # head(out$q_diag)
@@ -1004,3 +1152,11 @@ out <- extract_q_r_xmod(
 # out$q_xmod_summary
 # out$r_xmod_summary
 # out$plot_files
+#
+# Build a long parameter-diagnostics table (shape shown in the question):
+# diag_long <- extract_block_mcmc_param_diag(
+#   outdir = "/projectnb/dietzelab/guYANG/pecan/runners/wishart_sda/output_inter_q",
+#   file_id = 1,
+#   write_csv = TRUE
+# )
+# head(diag_long)
