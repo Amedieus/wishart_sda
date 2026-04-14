@@ -989,8 +989,8 @@ extract_q_r_xmod <- function(outdir,
 # ------------------------------ Usage ---------------------------------
 # source("inspect_q_r_xmod.R")
 out <- extract_q_r_xmod(
-  outdir = "/projectnb/dietzelab/guYANG/pecan/runners/wishart_sda/output_inter_q",
-  output_dir = "/projectnb/dietzelab/guYANG/pecan/runners/wishart_sda/output_inter_q/q_r_xmod_tables"
+  outdir = "/projectnb/dietzelab/guYANG/pecan/runners/wishart_sda/output_inter_q_4",
+  output_dir = "/projectnb/dietzelab/guYANG/pecan/runners/wishart_sda/output_inter_q_4/q_r_xmod_tables"
 )
 #
 # View per-timestep/site values:
