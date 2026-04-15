@@ -1711,6 +1711,7 @@ analysis_sda_block <- function (settings, block.list.all, X, obs.mean, obs.cov,
 ##' @description This function split long vector and covariance matrix into blocks corresponding to the localization.
 ##' 
 build.block.xy <- function(settings, block.list.all, X, obs.mean, obs.cov, t) {
+  use_legacy_q_update <- isTRUE(settings$state.data.assimilation$legacy_q_update)
   #set q.type from settings.
   if (settings$state.data.assimilation$q.type == "vector") {
     q.type <- 3
@@ -1847,6 +1848,7 @@ build.block.xy <- function(settings, block.list.all, X, obs.mean, obs.cov, t) {
       block.list[[i]]$constant$N <- length(f.start:f.end)
       block.list[[i]]$constant$YN <- length(block.list[[i]]$data$y.censored)
       block.list[[i]]$constant$q.type <- q.type
+      block.list[[i]]$constant$legacy.q.update <- use_legacy_q_update
     }
     names(block.list) <- site.ids
   } else {
@@ -1928,6 +1930,7 @@ build.block.xy <- function(settings, block.list.all, X, obs.mean, obs.cov, t) {
       block.list[[i]]$constant$N <- length(f.ind)
       block.list[[i]]$constant$YN <- length(y.block)
       block.list[[i]]$constant$q.type <- q.type
+      block.list[[i]]$constant$legacy.q.update <- use_legacy_q_update
     }
   }
   #if it's Wishart Q, we need to replace any NA Y with corresponding muf, and r with Pf.
@@ -2355,7 +2358,55 @@ MCMC_block_function <- function(block) {
   if (length(iX) == 0)     stop("ERROR: iX is empty — no X[] in MCMC output.")
   if (length(iX_mod) == 0) stop("ERROR: iX.mod is empty — no X.mod[] in MCMC output.")
   
-  ## ---- 11. Compute mua, pa ----
+  ## ---- 11. Extract posterior for q ----
+  ## (legacy implementation did not expose q_post_* in block$update)
+  iq <- grep("^q\\[", colnames(dat_mat))
+  q_post_mean <- if (length(iq) > 0) {
+    colMeans(dat_mat[, iq, drop = FALSE])
+  } else {
+    NA_real_
+  }
+  q_post_sd <- if (length(iq) > 0) {
+    apply(dat_mat[, iq, drop = FALSE], 2, stats::sd)
+  } else {
+    NA_real_
+  }
+  
+  ## ---- 11b. Update aq/bq estimates from q posterior (vector-q only) ----
+  aq_upd <- block$data$aq
+  bq_upd <- block$data$bq
+  if (isTRUE(block$constant$q.type == 3) &&
+      length(iq) == length(block$data$aq) &&
+      length(iq) > 0) {
+    q_mean <- colMeans(dat_mat[, iq, drop = FALSE])
+    q_var <- apply(dat_mat[, iq, drop = FALSE], 2, stats::var)
+    use_legacy <- isTRUE(block$constant$legacy.q.update)
+    if (use_legacy) {
+      # old behavior: direct moment matching without additional positivity/finite filters.
+      aq_upd <- (q_mean^2) / q_var
+      bq_upd <- q_mean / q_var
+    } else {
+      # new behavior: update only for finite/positive moments.
+      valid <- is.finite(q_mean) & is.finite(q_var) & (q_var > 0) & (q_mean > 0)
+      if (any(valid)) {
+        aq_upd[valid] <- (q_mean[valid]^2) / q_var[valid]
+        bq_upd[valid] <- q_mean[valid] / q_var[valid]
+      }
+    }
+    if (!is.null(block$aqq) && !is.null(block$bqq) && !is.null(block$t)) {
+      t_next <- block$t + 1
+      if (is.matrix(block$aqq) && ncol(block$aqq) >= t_next) {
+        block$aqq[, t_next] <- block$aqq[, block$t]
+        block$aqq[block$constant$H, t_next] <- aq_upd
+      }
+      if (is.matrix(block$bqq) && ncol(block$bqq) >= t_next) {
+        block$bqq[, t_next] <- block$bqq[, block$t]
+        block$bqq[block$constant$H, t_next] <- bq_upd
+      }
+    }
+  }
+  
+  ## ---- 12. Compute mua, pa ----
   if (length(iX) == 1) {
     mua <- mean(dat_mat[, iX])
     pa  <- matrix(stats::var(dat_mat[, iX]), nrow = 1, ncol = 1)
@@ -2364,7 +2415,7 @@ MCMC_block_function <- function(block) {
     pa  <- stats::cov(dat_mat[, iX, drop = FALSE])
   }
   
-  ## ---- 12. Compute mufa, pfa ----
+  ## ---- 13. Compute mufa, pfa ----
   if (length(iX_mod) == 1) {
     mufa <- mean(dat_mat[, iX_mod])
     pfa  <- matrix(stats::var(dat_mat[, iX_mod]), nrow = 1, ncol = 1)
@@ -2373,14 +2424,17 @@ MCMC_block_function <- function(block) {
     pfa  <- stats::cov(dat_mat[, iX_mod, drop = FALSE])
   }
   
-  ## ---- 13. Return ----
+  ## ---- 14. Return ----
   block$update <- list(
     mua = mua,
     pa  = pa,
     mufa = mufa,
     pfa = pfa,
-    aq = NA,
-    bq = NA
+    # q_post_* are posterior summaries from sampled q; legacy code may not include these fields.
+    q_post_mean = q_post_mean,
+    q_post_sd = q_post_sd,
+    aq = aq_upd,
+    bq = bq_upd
   )
   
   ## 保存诊断对象
@@ -2439,7 +2493,7 @@ update_q <- function (block.list.all, t, nt, aqq.Init = NULL, bqq.Init = NULL, M
             block.list[[i]]$aqq <- array(1, dim = c(nvar, nt + 1))
             block.list[[i]]$bqq <- array(1, dim = c(nvar, nt + 1))
           }
-          #update aq and bq based on aqq and bqq
+          # aq/bq are updated here (from aqq/bqq) before MCMC starts.
           block.list[[i]]$data$aq <- block.list[[i]]$aqq[block.list[[i]]$constant$H, t]
           block.list[[i]]$data$bq <- block.list[[i]]$bqq[block.list[[i]]$constant$H, t]
         } else if (block.list[[i]]$constant$q.type == 4) {
@@ -2464,6 +2518,7 @@ update_q <- function (block.list.all, t, nt, aqq.Init = NULL, bqq.Init = NULL, M
           # df / strength
           block.list[[i]]$bqq <- rep(max(nobs, nvar + 2), nt + 1)
           
+          # aq/bq are updated here for Wishart q.type.
           block.list[[i]]$data$aq <- GrabFillMatrix(
             block.list[[i]]$aqq[,,t],
             block.list[[i]]$constant$H
@@ -2485,7 +2540,7 @@ update_q <- function (block.list.all, t, nt, aqq.Init = NULL, bqq.Init = NULL, M
           #copy previous aqq and bqq to the current t
           block.list[[i]]$aqq <- block.list.pre[[i]]$aqq
           block.list[[i]]$bqq <- block.list.pre[[i]]$bqq
-          #update aq and bq
+          # aq/bq are updated here for t > 1 from previous aqq/bqq.
           block.list[[i]]$data$aq <- block.list[[i]]$aqq[block.list[[i]]$constant$H, t]
           block.list[[i]]$data$bq <- block.list[[i]]$bqq[block.list[[i]]$constant$H, t]
         } else if (block.list[[i]]$constant$q.type == 4) {
@@ -2550,7 +2605,9 @@ update_q <- function (block.list.all, t, nt, aqq.Init = NULL, bqq.Init = NULL, M
       }
     }
   } else {
-    #TODO: Implement the feature that Q can be updated based on the pft types.
+    PEcAn.logger::logger.warn(
+      "update_q received non-NULL MCMC_dat, but MCMC-based aq/bq updating is not implemented; keeping current aqq/bqq-derived aq/bq."
+    )
   }
   
   #return values.
@@ -2688,7 +2745,8 @@ block.2.vector <- function(block.list, X, H = NULL) {
 sda.forecast.local <- function (settings, obs.mean, obs.cov, Q = NULL, pre_enkf_params = NULL, 
                                 ensemble.samples = NULL, outdir = NULL, control = list(TimeseriesPlot = FALSE, 
                                                                                        OutlierDetection = FALSE, send_email = NULL, keepNC = TRUE, 
-                                                                                       forceRun = TRUE, MCMC.args = NULL)) 
+                                                                                       forceRun = TRUE, MCMC.args = NULL,
+                                                                                       legacy_q_update = FALSE)) 
 {
   if (future::supportsMulticore()) {
     future::plan(future::multicore)
@@ -2968,6 +3026,7 @@ sda.forecast.local <- function (settings, obs.mean, obs.cov, Q = NULL, pre_enkf_
         MCMC.args <- control$MCMC.args
       }
       settings$state.data.assimilation$batch.settings$analysis <- NULL
+      settings$state.data.assimilation$legacy_q_update <- isTRUE(control$legacy_q_update)
       ##### DO THE KALMAN Calculation
       # enkf.params[[obs.t]] <- analysis_sda_block(settings,
       #                                            block.list.all, X, obs.mean, obs.cov, t, nt,
