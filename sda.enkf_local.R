@@ -18,6 +18,7 @@
 #' `keepNC` decide if we want to keep the NetCDF files inside the out directory;
 #' `forceRun` decide if we want to proceed the Bayesian MCMC sampling without observations;
 #' `MCMC.args` include lists for controling the MCMC sampling process (iteration, nchains, burnin, and nthin.).
+#' `legacy_q_update` if TRUE uses legacy aq/bq MCMC moment updates; if FALSE uses the guarded/new update.
 #' `merge_nc` determine if we want to merge all netCDF files across sites and ensembles.
 #' If it's set as `TRUE`, we will then combine all netCDF files into the `merged_nc` folder within the `outdir`.
 #' @param debias List: R list containing the covariance directory and the start year.
@@ -40,6 +41,7 @@ sda.enkf_local <- function(settings,
                                         keepNC = TRUE,
                                         forceRun = TRUE,
                                         MCMC.args = NULL,
+                                        legacy_q_update = FALSE,
                                         merge_nc = TRUE),
                            debias = list(cov.dir = NULL, start.year = NULL)) {
   # grab cores from settings.
@@ -140,7 +142,9 @@ sda.enkf_local <- function(settings,
   #--get model specific functions
   do.call("library", list(paste0("PEcAn.", model)))
   my.write_restart <- paste0("write_restart.", model)
-  my.read_restart <- paste0("read_restart.", model)
+  ## Revise 2::
+  # my.read_restart <- paste0("read_restart.", model)
+  my.read_restart <- read.restart.SIPNET
   my.split_inputs  <- paste0("split_inputs.", model)
   #- Double checking some of the inputs
   if (is.null(adjustment)) adjustment <- TRUE
@@ -279,7 +283,7 @@ sda.enkf_local <- function(settings,
                                new.state = new_state_site,
                                new.params = new.params,
                                inputs = inputs,
-                               RENAME = FALSE,
+                               RENAME = TRUE,
                                ensemble.id = settings$ensemble$ensemble.id
                              )
                            })
@@ -342,16 +346,29 @@ sda.enkf_local <- function(settings,
     }, .progress = F)
     # submit jobs for reading sda outputs.
     PEcAn.logger::logger.info("Reading forecast outputs!")
-    reads <- PEcAnAssimSequential:::build_X(out.configs = out.configs, 
-                     settings = settings, 
-                     new.params = new.params, 
-                     nens = nens, 
-                     read_restart_times = read_restart_times, 
-                     outdir = outdir, 
-                     t = t, 
-                     var.names = var.names, 
+    ### Revise 1: 
+    reads <- PEcAnAssimSequential:::build_X(out.configs = out.configs,
+                     settings = settings,
+                     new.params = new.params,
+                     nens = nens,
+                     read_restart_times = read_restart_times,
+                     outdir = outdir,
+                     t = t,
+                     var.names = var.names,
                      my.read_restart = my.read_restart,
-                     restart_flag = FALSE)
+                     restart_flag = FALSE)  ##Default: FALSE
+
+    # reads <- build_X(out.configs = out.configs,
+    #                                         settings = settings,
+    #                                         new.params = new.params,
+    #                                         nens = nens,
+    #                                         read_restart_times = read_restart_times,
+    #                                         outdir = outdir,
+    #                                         t = t,
+    #                                         var.names = var.names,
+    #                                         my.read_restart = my.read_restart,
+    #                                         restart_flag = FALSE)  ##Default: FALSE
+    
     #let's read the parameters of each site/ens
     params.list <- reads %>% purrr::map(~.x %>% purrr::map("params"))
     # add namespace for variables inside the foreach.
@@ -414,7 +431,10 @@ sda.enkf_local <- function(settings,
       #running analysis function.
       # forbid submitting jobs to remote.
       settings$state.data.assimilation$batch.settings$analysis <- NULL
-      enkf.params[[obs.t]] <- PEcAnAssimSequential:::analysis_sda_block(settings, block.list.all, X, obs.mean, obs.cov, t, nt, MCMC.args, pre_enkf_params)
+      settings$state.data.assimilation$legacy_q_update <- isTRUE(control$legacy_q_update)
+      ## Revise 3
+      # enkf.params[[obs.t]] <- PEcAnAssimSequential:::analysis_sda_block(settings, block.list.all, X, obs.mean, obs.cov, t, nt, MCMC.args, pre_enkf_params)
+      enkf.params[[obs.t]] <- analysis_sda_block(settings, block.list.all, X, obs.mean, obs.cov, t, nt, MCMC.args, pre_enkf_params)
       enkf.params[[obs.t]] <- c(enkf.params[[obs.t]], RestartList = list(restart.list %>% stats::setNames(site.ids)))
       block.list.all <- enkf.params[[obs.t]]$block.list.all
       #Forecast
